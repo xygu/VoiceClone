@@ -34,7 +34,7 @@ MP3_BITRATE = "320k"
 # =============================================================================
 # Step 2: User Voice Reference
 # =============================================================================
-USER_VOICE_FILE = INPUT_DIR / "my.m4a"
+USER_VOICE_FILE = INPUT_DIR / "myshot.m4a"
 
 # Recording guidance:
 # - Record 10-15 minutes of speaking voice
