@@ -34,7 +34,7 @@ MP3_BITRATE = "320k"
 # =============================================================================
 # Step 2: User Voice Reference
 # =============================================================================
-USER_VOICE_FILE = INPUT_DIR / "my.m4a"
+USER_VOICE_FILE = INPUT_DIR / "myshot.m4a"
 
 # Recording guidance:
 # - Record 10-15 minutes of speaking voice
@@ -59,7 +59,8 @@ SEPARATED_ACCOMPANIMENT = INTERMEDIATE_DIR / "accompaniment.wav"
 # =============================================================================
 # Step 4: RVC Training Configuration
 # =============================================================================
-RVC_REPO_URL = "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git"
+# RVC_REPO_URL = "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git"
+RVC_REPO_URL = "https://ghproxy.com/https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git"
 RVC_REPO_DIR = PROJECT_ROOT / "Retrieval-based-Voice-Conversion-WebUI"
 
 # Training parameters
