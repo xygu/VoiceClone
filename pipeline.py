@@ -137,16 +137,22 @@ def step_train():
         log.error(msg)
         raise FileNotFoundError(msg)
 
-    # Clone RVC repo if needed
+    # Check RVC repo exists (manual download required due to network restrictions)
     if not config.RVC_REPO_DIR.exists():
-        log.info("Cloning RVC repository …")
-        subprocess.run(
-            ["git", "clone", "--depth", "1", config.RVC_REPO_URL, str(config.RVC_REPO_DIR)],
-            check=True,
+        raise FileNotFoundError(
+            f"\nRVC repository not found: {config.RVC_REPO_DIR}\n\n"
+            "Please manually download the RVC repository:\n"
+            "  1. On a machine with internet access, run:\n"
+            "     git clone --depth 1 https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git\n"
+            "  2. Copy the 'Retrieval-based-Voice-Conversion-WebUI' folder to:\n"
+            f"     {config.RVC_REPO_DIR}\n"
+            "  3. Then re-run this script."
         )
-        req = config.RVC_REPO_DIR / "requirements.txt"
-        if req.exists():
-            subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(req)], check=True)
+    log.info(f"Using existing RVC repository: {config.RVC_REPO_DIR}")
+    req = config.RVC_REPO_DIR / "requirements.txt"
+    if req.exists():
+        log.info("Installing RVC requirements …")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(req)], check=True)
 
     # Convert to mono WAV at target sample rate
     user_wav = config.RVC_DIR / "my_voice_raw.wav"

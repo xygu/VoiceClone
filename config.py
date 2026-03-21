@@ -60,7 +60,7 @@ SEPARATED_ACCOMPANIMENT = INTERMEDIATE_DIR / "accompaniment.wav"
 # Step 4: RVC Training Configuration
 # =============================================================================
 RVC_REPO_URL = "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git"
-RVC_REPO_DIR = PROJECT_ROOT / "Retrieval-based-Voice-Conversion-WebUI"
+RVC_REPO_DIR = PROJECT_ROOT / "rvc_workspace" / "Retrieval-based-Voice-Conversion-WebUI"
 
 # Training parameters
 RVC_SAMPLE_RATE = 40000  # 40000 or 48000
