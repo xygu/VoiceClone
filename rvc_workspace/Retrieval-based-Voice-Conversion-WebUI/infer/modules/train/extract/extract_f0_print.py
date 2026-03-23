@@ -2,10 +2,14 @@ import os
 import sys
 import traceback
 
+# infer/modules/train/extract/extract_f0_print.py → repo root is four levels up
+_extract_dir = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.normpath(os.path.join(_extract_dir, "..", "..", "..", ".."))
+sys.path.insert(0, _REPO_ROOT)
+os.chdir(_REPO_ROOT)
+
 import parselmouth
 
-now_dir = os.getcwd()
-sys.path.append(now_dir)
 import logging
 
 import numpy as np

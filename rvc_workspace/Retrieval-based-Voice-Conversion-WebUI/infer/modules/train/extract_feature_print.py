@@ -97,10 +97,24 @@ if os.access(model_path, os.F_OK) == False:
         % model_path
     )
     exit(0)
-models, saved_cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task(
-    [model_path],
-    suffix="",
-)
+# PyTorch 2.6 switched torch.load default to weights_only=True, but fairseq HuBERT
+# checkpoints require full unpickling (trusted local model file).
+_orig_torch_load = torch.load
+
+
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _orig_torch_load(*args, **kwargs)
+
+
+torch.load = _torch_load_compat
+try:
+    models, saved_cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task(
+        [model_path],
+        suffix="",
+    )
+finally:
+    torch.load = _orig_torch_load
 model = models[0]
 model = model.to(device)
 printt("move model to %s" % device)

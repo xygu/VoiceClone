@@ -7,6 +7,13 @@ import os
 from pathlib import Path
 
 # =============================================================================
+# HuggingFace Mirror Configuration (for China network)
+# =============================================================================
+# Set global HF mirror to avoid manual configuration in code
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+
+# =============================================================================
 # Project Paths
 # =============================================================================
 PROJECT_ROOT = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -57,10 +64,21 @@ SEPARATED_VOCALS = INTERMEDIATE_DIR / "vocals.wav"
 SEPARATED_ACCOMPANIMENT = INTERMEDIATE_DIR / "accompaniment.wav"
 
 # =============================================================================
+# Voice conversion backend
+# =============================================================================
+# "rvc" — Retrieval-based Voice Conversion (train + infer via RVC repo or rvc-python).
+# "passthrough" — Skip timbre conversion: separated vocals are copied straight to mix.
+#   Use this when RVC is blocked by network/GPU, or after converting audio in another tool.
+VOICE_CONVERSION_BACKEND = "rvc"  # "rvc" | "passthrough"
+
+# =============================================================================
 # Step 4: RVC Training Configuration
 # =============================================================================
 RVC_REPO_URL = "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git"
 RVC_REPO_DIR = PROJECT_ROOT / "rvc_workspace" / "Retrieval-based-Voice-Conversion-WebUI"
+
+# Hugging Face repo id for RVC assets (tools/download_models.py default minimal set)
+RVC_HF_REPO_ID = "lj1995/VoiceConversionWebUI"
 
 # Training parameters
 RVC_SAMPLE_RATE = 40000  # 40000 or 48000
