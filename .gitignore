@@ -1,1 +1,7 @@
 *.pyc
+rvc_workspace/Retrieval-based-Voice-Conversion-WebUI/logs/
+rvc_workspace/sliced/
+
+intermediate/sliced/
+nohup.out
+rvc_workspace/my_voice_raw.wav

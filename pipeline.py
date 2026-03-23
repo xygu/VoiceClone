@@ -5,9 +5,12 @@ Hamilton "My Shot" Voice Conversion Pipeline
 Automated pipeline:
   1. Download Hamilton's "My Shot" from YouTube
   2. Separate vocals / accompaniment via Demucs
-  3. Train an RVC model on user's voice
-  4. Convert separated vocals to user's timbre
+  3. Train an RVC model on user's voice (skipped if VOICE_CONVERSION_BACKEND=passthrough)
+  4. Convert separated vocals to user's timbre (RVC, or passthrough copy)
   5. Mix converted vocals + accompaniment → final song
+
+RVC assets: run rvc_workspace/.../tools/download_models.py (defaults to minimal set only).
+Install huggingface_hub for resumable downloads (requirements.txt). Use VOICE_CONVERSION_BACKEND=passthrough to skip RVC.
 
 Usage:
     python pipeline.py --all
@@ -120,10 +123,15 @@ def step_separate():
 
 # ── STEP 3  Train RVC model ─────────────────────────────────────────────────
 def step_train():
-    """Train an RVC voice model on the user's recording."""
+    """Train a voice model (RVC) or skip when using passthrough backend."""
     log.info("=" * 60)
-    log.info("STEP 3: Train RVC voice model")
+    log.info("STEP 3: Train voice model")
     log.info("=" * 60)
+
+    if getattr(config, "VOICE_CONVERSION_BACKEND", "rvc") == "passthrough":
+        log.info("VOICE_CONVERSION_BACKEND=passthrough — skipping training (no timbre model).")
+        log.info("STEP 3 COMPLETE")
+        return
 
     if not config.USER_VOICE_FILE.exists():
         msg = (
@@ -152,37 +160,48 @@ def step_train():
     req = config.RVC_REPO_DIR / "requirements.txt"
     if req.exists():
         log.info("Installing RVC requirements …")
+        # Downgrade pip to <24.1 to avoid metadata issues with omegaconf<2.1 (required by fairseq)
+        subprocess.run([sys.executable, "-m", "pip", "install", "pip<24.1"], check=True)
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(req)], check=True)
-
-    # Convert to mono WAV at target sample rate
-    user_wav = config.RVC_DIR / "my_voice_raw.wav"
-    if not user_wav.exists():
-        subprocess.run([
-            "ffmpeg", "-y", "-i", str(config.USER_VOICE_FILE),
-            "-ar", str(config.RVC_SAMPLE_RATE), "-ac", "1", str(user_wav),
-        ], check=True)
-
-    # Slice into segments
-    sliced_dir = config.RVC_DIR / "sliced"
-    sliced_dir.mkdir(exist_ok=True)
-    if not any(sliced_dir.glob("*.wav")):
-        _slice_audio(user_wav, sliced_dir, seg_len=10.0, sr=config.RVC_SAMPLE_RATE)
 
     # Train
     try:
+        # Slice into segments for rvc_python method
+        sliced_dir = config.INTERMEDIATE_DIR / "sliced"
+        sliced_dir.mkdir(exist_ok=True)
+        if not any(sliced_dir.glob("*.wav")):
+            _slice_audio(config.USER_VOICE_FILE, sliced_dir, seg_len=10.0, sr=config.RVC_SAMPLE_RATE)
         _train_rvc_python(sliced_dir)
     except ImportError:
-        _train_rvc_repo(sliced_dir)
+        # Use original audio file directly for RVC repo method (preserves quality)
+        _train_rvc_repo()
 
     log.info("STEP 3 COMPLETE")
 
 
 def _slice_audio(src, dst, seg_len=10.0, sr=40000):
-    import soundfile as sf, numpy as np
-    data, file_sr = sf.read(str(src))
-    if file_sr != sr:
-        import librosa
-        data = librosa.resample(data, orig_sr=file_sr, target_sr=sr)
+    import soundfile as sf, numpy as np, tempfile, os
+    
+    # Convert to WAV if input is not WAV (e.g., M4A files)
+    src_path = Path(src)
+    if src_path.suffix.lower() != ".wav":
+        log.info(f"Converting {src_path.suffix} to WAV for processing...")
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_wav = tmp.name
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-i", str(src),
+                "-ar", str(sr), "-ac", "1", "-f", "wav", tmp_wav
+            ], check=True, capture_output=True)
+            data, file_sr = sf.read(tmp_wav)
+        finally:
+            os.unlink(tmp_wav)
+    else:
+        data, file_sr = sf.read(str(src))
+        if file_sr != sr:
+            import librosa
+            data = librosa.resample(data, orig_sr=file_sr, target_sr=sr)
+    
     if data.ndim > 1:
         data = data.mean(axis=1)
     n = int(seg_len * sr)
@@ -207,36 +226,88 @@ def _train_rvc_python(sliced_dir):
     )
 
 
-def _train_rvc_repo(sliced_dir):
+def _train_rvc_repo():
     rd = config.RVC_REPO_DIR
     exp = rd / "logs" / config.RVC_MODEL_NAME
     exp.mkdir(parents=True, exist_ok=True)
     gt = exp / "0_gt_wavs"; gt.mkdir(exist_ok=True)
-    for w in sliced_dir.glob("*.wav"):
-        shutil.copy2(w, gt)
+    # Copy original audio file directly (RVC handles format conversion internally)
+    original_audio = config.USER_VOICE_FILE
+    shutil.copy2(original_audio, gt / original_audio.name)
 
-    def _run(script_rel, *args):
+    rvc_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+
+    def _run(script_rel, *args, hint=None):
         s = rd / script_rel
         if s.exists():
-            subprocess.run([sys.executable, str(s), *args], cwd=str(rd), check=True)
+            if hint:
+                log.info(hint)
+            subprocess.run(
+                [sys.executable, str(s), *args],
+                cwd=str(rd),
+                check=True,
+                env=rvc_env,
+            )
         else:
             log.warning(f"Script not found: {s}")
 
-    _run("infer/modules/train/preprocess/preprocess.py",
-         str(gt), str(exp), str(config.RVC_SAMPLE_RATE))
-    _run("infer/modules/train/extract/extract_f0.py",
-         str(exp), config.RVC_F0_METHOD)
-    _run("infer/modules/train/extract/extract_feature.py",
-         str(exp), "hubert")
-    _run("infer/modules/train/train.py",
-         "-e", config.RVC_MODEL_NAME,
-         "-sr", str(config.RVC_SAMPLE_RATE),
-         "-bs", str(config.RVC_BATCH_SIZE),
-         "-te", str(config.RVC_TRAINING_EPOCHS),
-         "-se", "50",
-         "-pg", str(rd / "assets/pretrained/f0G40k.pth"),
-         "-pd", str(rd / "assets/pretrained/f0D40k.pth"),
-         "-l", "0")
+    _run(
+        "infer/modules/train/preprocess.py",
+        str(gt),
+        str(config.RVC_SAMPLE_RATE),
+        "4",
+        str(exp),
+        "False",
+        "3.7",
+        hint="RVC: preprocessing audio slices …",
+    )
+    _run(
+        "infer/modules/train/extract/extract_f0_print.py",
+        str(exp),
+        "4",
+        config.RVC_F0_METHOD,
+        hint=(
+            "RVC: extracting F0 (rmvpe loads a large model per worker on CPU — "
+            "often several minutes with little terminal output). "
+            f"Tail log: {exp / 'extract_f0_feature.log'}"
+        ),
+    )
+    _run(
+        "infer/modules/train/extract_feature_print.py",
+        "cuda",
+        "1",
+        "0",
+        str(exp),
+        "v2",
+        "true",
+        hint="RVC: extracting HuBERT features (GPU if available; may be slow on CPU) …",
+    )
+    _run(
+        "infer/modules/train/train.py",
+        "-e",
+        config.RVC_MODEL_NAME,
+        "-sr",
+        str(config.RVC_SAMPLE_RATE),
+        "-bs",
+        str(config.RVC_BATCH_SIZE),
+        "-te",
+        str(config.RVC_TRAINING_EPOCHS),
+        "-se",
+        "50",
+        "-pg",
+        str(rd / "assets/pretrained/f0G40k.pth"),
+        "-pd",
+        str(rd / "assets/pretrained/f0D40k.pth"),
+        "-l",
+        "0",
+        "-v",
+        "v2",
+        "-f0",
+        "1",
+        "-c",
+        "0",
+        hint=f"RVC: training ({config.RVC_TRAINING_EPOCHS} epochs) — longest step …",
+    )
 
     for pat, dst in [("G_*.pth", config.RVC_TRAINED_MODEL), ("*.index", config.RVC_TRAINED_INDEX)]:
         files = sorted(exp.glob(pat), key=lambda p: p.stat().st_mtime)
@@ -247,9 +318,9 @@ def _train_rvc_repo(sliced_dir):
 
 # ── STEP 4  Voice conversion (inference) ────────────────────────────────────
 def step_convert():
-    """Convert separated vocals to user's timbre via RVC."""
+    """Convert separated vocals to user's timbre (RVC) or copy through (passthrough)."""
     log.info("=" * 60)
-    log.info("STEP 4: Voice conversion (RVC inference)")
+    log.info("STEP 4: Voice conversion")
     log.info("=" * 60)
 
     if config.CONVERTED_VOCALS.exists():
@@ -257,6 +328,14 @@ def step_convert():
         return
     if not config.SEPARATED_VOCALS.exists():
         raise FileNotFoundError("Run --separate first.")
+
+    if getattr(config, "VOICE_CONVERSION_BACKEND", "rvc") == "passthrough":
+        log.info("VOICE_CONVERSION_BACKEND=passthrough — copying separated vocals (no RVC).")
+        shutil.copy2(config.SEPARATED_VOCALS, config.CONVERTED_VOCALS)
+        log.info(f"Vocals (unchanged timbre) → {config.CONVERTED_VOCALS}")
+        log.info("STEP 4 COMPLETE")
+        return
+
     if not config.RVC_TRAINED_MODEL.exists():
         raise FileNotFoundError("Run --train first.")
 
@@ -306,7 +385,12 @@ def _convert_rvc_repo():
     ]
     if config.RVC_TRAINED_INDEX.exists():
         cmd += ["--index_path", str(config.RVC_TRAINED_INDEX)]
-    subprocess.run(cmd, cwd=str(rd), check=True)
+    subprocess.run(
+        cmd,
+        cwd=str(rd),
+        check=True,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
 
 
 # ── STEP 5  Mix & master ────────────────────────────────────────────────────
@@ -360,8 +444,8 @@ def main():
     p.add_argument("--all",       action="store_true", help="Run full pipeline (steps 1-5)")
     p.add_argument("--download",  action="store_true", help="Step 1: Download song")
     p.add_argument("--separate",  action="store_true", help="Step 2: Separate vocals")
-    p.add_argument("--train",     action="store_true", help="Step 3: Train RVC model")
-    p.add_argument("--convert",   action="store_true", help="Step 4: Convert vocals")
+    p.add_argument("--train",     action="store_true", help="Step 3: Train voice model (RVC; skipped if passthrough)")
+    p.add_argument("--convert",   action="store_true", help="Step 4: Convert vocals (or passthrough copy)")
     p.add_argument("--mix",       action="store_true", help="Step 5: Mix final output")
     p.add_argument("--cookies-from-browser", type=str, metavar="BROWSER",
                    help="Browser to extract cookies from for YouTube authentication (e.g., chrome, safari, firefox)")

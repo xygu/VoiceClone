@@ -1,6 +1,13 @@
 import os
 import sys
 import traceback
+from datetime import datetime
+
+# infer/modules/train/extract_feature_print.py → repo root is three levels up
+_train_dir = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.normpath(os.path.join(_train_dir, "..", "..", ".."))
+sys.path.insert(0, _REPO_ROOT)
+os.chdir(_REPO_ROOT)
 
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
@@ -78,7 +85,11 @@ def readwave(wav_path, normalize=False):
 
 
 # HuBERT model
-printt("load model(s) from {}".format(model_path))
+printt(
+    "load model(s) from {} [{}]".format(
+        model_path, datetime.now().isoformat(timespec="seconds")
+    )
+)
 # if hubert model is exist
 if os.access(model_path, os.F_OK) == False:
     printt(
