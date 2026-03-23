@@ -158,19 +158,35 @@ def step_train():
         )
     log.info(f"Using existing RVC repository: {config.RVC_REPO_DIR}")
     req = config.RVC_REPO_DIR / "requirements.txt"
-    if req.exists():
+    if req.exists() and getattr(config, "RVC_INSTALL_REQS", True):
         log.info("Installing RVC requirements …")
         # Downgrade pip to <24.1 to avoid metadata issues with omegaconf<2.1 (required by fairseq)
         subprocess.run([sys.executable, "-m", "pip", "install", "pip<24.1"], check=True)
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(req)], check=True)
+    elif req.exists():
+        log.info("Skipping RVC requirements install (RVC_INSTALL_REQS=False).")
 
     # Train
     try:
         # Slice into segments for rvc_python method
         sliced_dir = config.INTERMEDIATE_DIR / "sliced"
         sliced_dir.mkdir(exist_ok=True)
-        if not any(sliced_dir.glob("*.wav")):
-            _slice_audio(config.USER_VOICE_FILE, sliced_dir, seg_len=10.0, sr=config.RVC_SAMPLE_RATE)
+        if getattr(config, "RVC_SLICE_AUDIO", True):
+            if not any(sliced_dir.glob("*.wav")):
+                _slice_audio(
+                    config.USER_VOICE_FILE,
+                    sliced_dir,
+                    seg_len=10.0,
+                    sr=config.RVC_SAMPLE_RATE,
+                )
+        else:
+            log.info("Skipping audio slicing (RVC_SLICE_AUDIO=False).")
+            if not any(sliced_dir.glob("*.wav")):
+                raise FileNotFoundError(
+                    "No sliced wav files found under intermediate/sliced while "
+                    "RVC_SLICE_AUDIO=False. "
+                    "Please enable slicing once or place pre-sliced wav files there."
+                )
         _train_rvc_python(sliced_dir)
     except ImportError:
         # Use original audio file directly for RVC repo method (preserves quality)

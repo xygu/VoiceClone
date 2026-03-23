@@ -88,6 +88,12 @@ RVC_BATCH_SIZE = 8  # Adjust based on GPU VRAM (8 for ~8GB, 16 for ~16GB+)
 RVC_MODEL_NAME = "my_voice"
 RVC_SPEAKER_ID = 0
 
+# Train flow switches
+# Set to False to skip pip install during --train when environment is already prepared.
+RVC_INSTALL_REQS = True
+# Set to False to skip audio slicing and reuse existing intermediate/sliced/*.wav.
+RVC_SLICE_AUDIO = True
+
 # Paths for trained model artifacts
 RVC_TRAINED_MODEL = RVC_DIR / "my_voice.pth"
 RVC_TRAINED_INDEX = RVC_DIR / "my_voice.index"
