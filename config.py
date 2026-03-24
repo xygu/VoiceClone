@@ -90,9 +90,9 @@ RVC_SPEAKER_ID = 0
 
 # Train flow switches
 # Set to False to skip pip install during --train when environment is already prepared.
-RVC_INSTALL_REQS = True
+RVC_INSTALL_REQS = False
 # Set to False to skip audio slicing and reuse existing intermediate/sliced/*.wav.
-RVC_SLICE_AUDIO = True
+RVC_SLICE_AUDIO = False
 
 # Paths for trained model artifacts
 RVC_TRAINED_MODEL = RVC_DIR / "my_voice.pth"
