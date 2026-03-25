@@ -242,6 +242,67 @@ def _train_rvc_python(sliced_dir):
     )
 
 
+def _generate_filelist(exp_dir, rvc_version, sample_rate):
+    """Generate filelist.txt required by train.py.
+    
+    This combines ground truth wavs, features, and F0 files into a training manifest.
+    Based on infer-web.py logic.
+    """
+    import random
+    
+    gt_wavs_dir = exp_dir / "0_gt_wavs"
+    feature_dir = exp_dir / f"3_feature{'256' if rvc_version == 'v1' else '768'}"
+    f0_dir = exp_dir / "2a_f0"
+    f0nsf_dir = exp_dir / "2b-f0nsf"
+    
+    # Get all files that exist in both gt_wavs and feature directories
+    if not gt_wavs_dir.exists():
+        raise FileNotFoundError(f"Ground truth wavs directory not found: {gt_wavs_dir}")
+    if not feature_dir.exists():
+        raise FileNotFoundError(f"Feature directory not found: {feature_dir}")
+    
+    gt_names = set([name.split(".")[0] for name in os.listdir(gt_wavs_dir) if name.endswith(".wav")])
+    feature_names = set([name.split(".")[0] for name in os.listdir(feature_dir) if name.endswith(".npy")])
+    names = sorted(list(gt_names & feature_names))
+    
+    if not names:
+        raise FileNotFoundError(
+            f"No matching files found between {gt_wavs_dir} and {feature_dir}. "
+            "Please check preprocessing and feature extraction steps."
+        )
+    
+    log.info(f"Found {len(names)} valid training samples")
+    
+    opt = []
+    spk_id = "0"  # Single speaker
+    
+    # Format: gt_wav|feature|f0|f0nsf|spk_id (when f0 is enabled)
+    for name in names:
+        opt.append(
+            f"{gt_wavs_dir}/{name}.wav|{feature_dir}/{name}.npy|{f0_dir}/{name}.wav.npy|{f0nsf_dir}/{name}.wav.npy|{spk_id}"
+        )
+    
+    # Add mute samples for padding (2 samples as in original RVC)
+    rd = config.RVC_REPO_DIR
+    sr_name = f"{sample_rate // 1000}k"
+    fea_dim = 256 if rvc_version == "v1" else 768
+    for _ in range(2):
+        opt.append(
+            f"{rd}/logs/mute/0_gt_wavs/mute{sr_name}.wav|"
+            f"{rd}/logs/mute/3_feature{fea_dim}/mute.npy|"
+            f"{rd}/logs/mute/2a_f0/mute.wav.npy|"
+            f"{rd}/logs/mute/2b-f0nsf/mute.wav.npy|{spk_id}"
+        )
+    
+    random.shuffle(opt)
+    
+    filelist_path = exp_dir / "filelist.txt"
+    with open(filelist_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(opt))
+    
+    log.info(f"Generated filelist.txt with {len(opt)} entries at {filelist_path}")
+
+
 def _train_rvc_repo():
     rd = config.RVC_REPO_DIR
     exp = rd / "logs" / config.RVC_MODEL_NAME
@@ -365,6 +426,10 @@ def _train_rvc_repo():
         "true",
         hint="RVC: extracting HuBERT features (GPU if available; may be slow on CPU) …",
     )
+
+    # Generate filelist.txt required by train.py
+    _generate_filelist(exp, rvc_version, config.RVC_SAMPLE_RATE)
+
     _run(
         "infer/modules/train/train.py",
         "-e",
