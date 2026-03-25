@@ -169,8 +169,9 @@ def step_train():
     # Train
     try:
         # Slice into segments for rvc_python method
-        sliced_dir = config.INTERMEDIATE_DIR / "sliced"
-        sliced_dir.mkdir(exist_ok=True)
+        # Organize sliced files by sample rate to avoid clearing when switching rates
+        sliced_dir = config.INTERMEDIATE_DIR / "sliced" / str(config.RVC_SAMPLE_RATE)
+        sliced_dir.mkdir(parents=True, exist_ok=True)
         if getattr(config, "RVC_SLICE_AUDIO", True):
             if not any(sliced_dir.glob("*.wav")):
                 _slice_audio(
@@ -183,7 +184,7 @@ def step_train():
             log.info("Skipping audio slicing (RVC_SLICE_AUDIO=False).")
             if not any(sliced_dir.glob("*.wav")):
                 raise FileNotFoundError(
-                    "No sliced wav files found under intermediate/sliced while "
+                    f"No sliced wav files found under {sliced_dir} while "
                     "RVC_SLICE_AUDIO=False. "
                     "Please enable slicing once or place pre-sliced wav files there."
                 )
