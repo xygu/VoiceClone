@@ -430,12 +430,15 @@ def _train_rvc_repo():
     # Generate filelist.txt required by train.py
     _generate_filelist(exp, rvc_version, config.RVC_SAMPLE_RATE)
 
+    # Convert sample rate to RVC format (e.g., 48000 -> "48k")
+    sr_for_rvc = f"{config.RVC_SAMPLE_RATE // 1000}k"
+    
     _run(
         "infer/modules/train/train.py",
         "-e",
         config.RVC_MODEL_NAME,
         "-sr",
-        str(config.RVC_SAMPLE_RATE),
+        sr_for_rvc,
         "-bs",
         str(config.RVC_BATCH_SIZE),
         "-te",
