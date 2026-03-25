@@ -1,7 +1,12 @@
 *.pyc
 rvc_workspace/Retrieval-based-Voice-Conversion-WebUI/logs/
 rvc_workspace/sliced/
-
+.nfs*
 intermediate/sliced/
 nohup.out
 rvc_workspace/my_voice_raw.wav
+
+output.log
+wavs/
+yt_audio_cache/
+
