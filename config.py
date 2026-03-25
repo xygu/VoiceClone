@@ -84,9 +84,14 @@ RVC_HF_REPO_ID = "lj1995/VoiceConversionWebUI"
 RVC_SAMPLE_RATE = 48000  # 48000 for v2 support (better quality), or 40000/32000 for v1
 RVC_F0_METHOD = "rmvpe"  # "rmvpe" (best quality), "crepe", "pm", "harvest"
 RVC_TRAINING_EPOCHS = 200  # 200-300 recommended for 10 min data
-RVC_BATCH_SIZE = 8  # Adjust based on GPU VRAM (8 for ~8GB, 16 for ~16GB+)
+RVC_BATCH_SIZE = 32  # Optimized for 80GB VRAM (A800): 32-64 works well
 RVC_MODEL_NAME = "my_voice"
 RVC_SPEAKER_ID = 0
+
+# GPU Configuration
+# Set to specific GPU index (e.g., "0") or "auto" to use first available
+# For multi-GPU servers, you can distribute training by setting different indices
+RVC_CUDA_DEVICE = "0"  # GPU index to use for training (A800 has 8 GPUs, indices 0-7)
 
 # Train flow switches
 # Set to False to skip pip install during --train when environment is already prepared.

@@ -251,6 +251,34 @@ def _train_rvc_repo():
     original_audio = config.USER_VOICE_FILE
     shutil.copy2(original_audio, gt / original_audio.name)
 
+    # Log CUDA/GPU information
+    log.info("=" * 60)
+    log.info("GPU Configuration Check")
+    log.info("=" * 60)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            log.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
+            log.info(f"GPU count: {gpu_count}")
+            for i in range(gpu_count):
+                props = torch.cuda.get_device_properties(i)
+                mem_total = props.total_memory / 1024**3
+                mem_free = torch.cuda.memory_reserved(i) / 1024**3
+                log.info(f"  GPU {i}: {props.name}, {mem_total:.1f} GB total")
+            # Use configured GPU device
+            cuda_device = getattr(config, "RVC_CUDA_DEVICE", "0")
+            if cuda_device == "auto":
+                cuda_device = "0"
+            log.info(f"Using CUDA device: {cuda_device}")
+            # Set CUDA_VISIBLE_DEVICES for training
+            os.environ["CUDA_VISIBLE_DEVICES"] = cuda_device
+        else:
+            log.warning("CUDA not available - training will be VERY slow on CPU!")
+    except Exception as e:
+        log.warning(f"Could not query GPU info: {e}")
+    log.info("=" * 60)
+
     # Determine version based on sample rate (40k only has v1 config)
     sr = config.RVC_SAMPLE_RATE
     if sr == 40000:
@@ -306,7 +334,7 @@ def _train_rvc_repo():
         str(exp),
         "False",
         "3.7",
-        hint="RVC: preprocessing audio slices …",
+        hint=f"RVC: preprocessing audio slices (sample_rate={config.RVC_SAMPLE_RATE}) …",
     )
     _run(
         "infer/modules/train/extract/extract_f0_print.py",
@@ -321,7 +349,7 @@ def _train_rvc_repo():
     )
     _run(
         "infer/modules/train/extract_feature_print.py",
-        "cuda",
+        "cuda",  # GPU device - uses CUDA_VISIBLE_DEVICES set above
         "1",
         "0",
         str(exp),
@@ -353,7 +381,7 @@ def _train_rvc_repo():
         "1",
         "-c",
         "0",
-        hint=f"RVC: training ({config.RVC_TRAINING_EPOCHS} epochs) — longest step …",
+        hint=f"RVC: training (epochs={config.RVC_TRAINING_EPOCHS}, batch_size={config.RVC_BATCH_SIZE}) — longest step …",
     )
 
     for pat, dst in [("G_*.pth", config.RVC_TRAINED_MODEL), ("*.index", config.RVC_TRAINED_INDEX)]:
