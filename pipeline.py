@@ -246,7 +246,15 @@ def _train_rvc_repo():
     rd = config.RVC_REPO_DIR
     exp = rd / "logs" / config.RVC_MODEL_NAME
     exp.mkdir(parents=True, exist_ok=True)
-    gt = exp / "0_gt_wavs"; gt.mkdir(exist_ok=True)
+    gt = exp / "0_gt_wavs"
+    
+    # Clear existing segments to prevent accumulation across runs
+    if gt.exists():
+        for f in gt.glob("*"):
+            if f.is_file():
+                f.unlink()
+    gt.mkdir(exist_ok=True)
+    
     # Copy original audio file directly (RVC handles format conversion internally)
     original_audio = config.USER_VOICE_FILE
     shutil.copy2(original_audio, gt / original_audio.name)
