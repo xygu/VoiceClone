@@ -81,7 +81,7 @@ RVC_REPO_DIR = PROJECT_ROOT / "rvc_workspace" / "Retrieval-based-Voice-Conversio
 RVC_HF_REPO_ID = "lj1995/VoiceConversionWebUI"
 
 # Training parameters
-RVC_SAMPLE_RATE = 48000  # 48000 for v2 support (better quality), or 40000/32000 for v1
+RVC_SAMPLE_RATE = 40000  # 40000 for v1 (models already downloaded), or 48000 for v2 (requires f0G48k/f0D48k)
 RVC_F0_METHOD = "rmvpe"  # "rmvpe" (best quality), "crepe", "pm", "harvest"
 RVC_TRAINING_EPOCHS = 200  # 200-300 recommended for 10 min data
 RVC_BATCH_SIZE = 32  # Optimized for 80GB VRAM (A800): 32-64 works well
