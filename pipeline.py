@@ -251,6 +251,37 @@ def _train_rvc_repo():
     original_audio = config.USER_VOICE_FILE
     shutil.copy2(original_audio, gt / original_audio.name)
 
+    # Determine version based on sample rate (40k only has v1 config)
+    sr = config.RVC_SAMPLE_RATE
+    if sr == 40000:
+        rvc_version = "v1"
+        config_template = rd / "configs" / "v1" / "40k.json"
+    else:
+        rvc_version = "v2"
+        config_template = rd / "configs" / "v2" / f"{sr // 1000}k.json"
+        if not config_template.exists():
+            rvc_version = "v1"
+            config_template = rd / "configs" / "v1" / f"{sr // 1000}k.json"
+
+    # Determine pretrained model paths based on version and sample rate
+    sr_name = f"{sr // 1000}k"
+    if rvc_version == "v2":
+        pretrained_dir = rd / "assets" / "pretrained_v2"
+    else:
+        pretrained_dir = rd / "assets" / "pretrained"
+    pretrained_g = pretrained_dir / f"f0G{sr_name}.pth"
+    pretrained_d = pretrained_dir / f"f0D{sr_name}.pth"
+
+    # Create config.json from template (required by train.py)
+    config_json = exp / "config.json"
+    if not config_json.exists() and config_template.exists():
+        import json
+        with open(config_template, "r") as f:
+            config_data = json.load(f)
+        with open(config_json, "w") as f:
+            json.dump(config_data, f, indent=4)
+        log.info(f"Created config.json from {config_template}")
+
     rvc_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
 
     def _run(script_rel, *args, hint=None):
@@ -294,7 +325,7 @@ def _train_rvc_repo():
         "1",
         "0",
         str(exp),
-        "v2",
+        rvc_version,
         "true",
         hint="RVC: extracting HuBERT features (GPU if available; may be slow on CPU) …",
     )
@@ -311,13 +342,13 @@ def _train_rvc_repo():
         "-se",
         "50",
         "-pg",
-        str(rd / "assets/pretrained/f0G40k.pth"),
+        str(pretrained_g),
         "-pd",
-        str(rd / "assets/pretrained/f0D40k.pth"),
+        str(pretrained_d),
         "-l",
         "0",
         "-v",
-        "v2",
+        rvc_version,
         "-f0",
         "1",
         "-c",
