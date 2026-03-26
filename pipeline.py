@@ -505,6 +505,24 @@ def _train_rvc_repo(quick=False):
     # Use minimal epochs for quick debugging
     training_epochs = 2 if quick else config.RVC_TRAINING_EPOCHS
     
+    # Clear existing checkpoints if target epoch is less than current checkpoint epoch
+    # RVC auto-resumes from latest checkpoint, so we need to clear when restarting with fewer epochs
+    existing_ckpt = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if existing_ckpt:
+        import torch
+        try:
+            ckpt = torch.load(existing_ckpt[0], map_location="cpu", weights_only=False)
+            existing_epoch = ckpt.get("epoch", 0)
+            if existing_epoch >= training_epochs:
+                log.info(f"Clearing existing checkpoints (epoch {existing_epoch} >= target {training_epochs})")
+                for f in exp.glob("G_*.pth"):
+                    f.unlink()
+                for f in exp.glob("D_*.pth"):
+                    f.unlink()
+                log.info("Cleared G_*.pth and D_*.pth checkpoints")
+        except Exception as e:
+            log.warning(f"Could not read checkpoint epoch: {e}")
+    
     _run(
         "infer/modules/train/train.py",
         "-e",
