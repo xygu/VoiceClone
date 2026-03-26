@@ -331,23 +331,53 @@ def _train_rvc_repo():
     exp.mkdir(parents=True, exist_ok=True)
     gt = exp / "0_gt_wavs"
     
-    # Clear existing segments to prevent accumulation across runs
-    if gt.exists():
-        for f in gt.glob("*"):
-            if f.is_file():
-                f.unlink()
-    gt.mkdir(exist_ok=True)
+    # Determine version based on sample rate (40k only has v1 config)
+    sr = config.RVC_SAMPLE_RATE
+    if sr == 40000:
+        rvc_version = "v1"
+        config_template = rd / "configs" / "v1" / "40k.json"
+    else:
+        rvc_version = "v2"
+        config_template = rd / "configs" / "v2" / f"{sr // 1000}k.json"
+        if not config_template.exists():
+            rvc_version = "v1"
+            config_template = rd / "configs" / "v1" / f"{sr // 1000}k.json"
+
+    # Check if we need to reprocess audio (sample rate changed or no existing segments)
+    config_json = exp / "config.json"
+    need_reprocess = True
+    if config_json.exists() and gt.exists() and any(gt.glob("*.wav")):
+        import json
+        try:
+            with open(config_json, "r") as f:
+                existing_config = json.load(f)
+            existing_sr = existing_config.get("data", {}).get("sampling_rate")
+            if existing_sr == sr:
+                need_reprocess = False
+                log.info(f"Sample rate unchanged ({sr} Hz) and audio segments exist — skipping preprocessing")
+            else:
+                log.info(f"Sample rate changed from {existing_sr} Hz to {sr} Hz — reprocessing required")
+        except Exception:
+            pass
     
-    # Copy original audio file directly (RVC handles format conversion internally)
-    original_audio = config.USER_VOICE_FILE
-    shutil.copy2(original_audio, gt / original_audio.name)
+    if need_reprocess:
+        # Clear existing segments to prevent accumulation across runs
+        if gt.exists():
+            for f in gt.glob("*"):
+                if f.is_file():
+                    f.unlink()
+        gt.mkdir(exist_ok=True)
+        
+        # Copy original audio file directly (RVC handles format conversion internally)
+        original_audio = config.USER_VOICE_FILE
+        shutil.copy2(original_audio, gt / original_audio.name)
 
     # Log original audio information
     log.info("=" * 60)
     log.info("Audio Source Check")
     log.info("=" * 60)
-    log.info(f"Original audio file: {original_audio}")
-    original_sr = _detect_audio_sr(original_audio)
+    log.info(f"Original audio file: {config.USER_VOICE_FILE}")
+    original_sr = _detect_audio_sr(config.USER_VOICE_FILE)
     if original_sr:
         log.info(f"Original audio sample rate: {original_sr} Hz")
     else:
@@ -385,18 +415,6 @@ def _train_rvc_repo():
         log.warning(f"Could not query GPU info: {e}")
     log.info("=" * 60)
 
-    # Determine version based on sample rate (40k only has v1 config)
-    sr = config.RVC_SAMPLE_RATE
-    if sr == 40000:
-        rvc_version = "v1"
-        config_template = rd / "configs" / "v1" / "40k.json"
-    else:
-        rvc_version = "v2"
-        config_template = rd / "configs" / "v2" / f"{sr // 1000}k.json"
-        if not config_template.exists():
-            rvc_version = "v1"
-            config_template = rd / "configs" / "v1" / f"{sr // 1000}k.json"
-
     # Determine pretrained model paths based on version and sample rate
     sr_name = f"{sr // 1000}k"
     if rvc_version == "v2":
@@ -406,16 +424,6 @@ def _train_rvc_repo():
     pretrained_g = pretrained_dir / f"f0G{sr_name}.pth"
     pretrained_d = pretrained_dir / f"f0D{sr_name}.pth"
 
-    # Create config.json from template (required by train.py)
-    config_json = exp / "config.json"
-    if not config_json.exists() and config_template.exists():
-        import json
-        with open(config_template, "r") as f:
-            config_data = json.load(f)
-        with open(config_json, "w") as f:
-            json.dump(config_data, f, indent=4)
-        log.info(f"Created config.json from {config_template}")
-
     rvc_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
 
     def _run(script_rel, *args, hint=None):
@@ -423,46 +431,65 @@ def _train_rvc_repo():
         if s.exists():
             if hint:
                 log.info(hint)
+            # Force line-buffered output for real-time logging
+            env = {**rvc_env, "PYTHONUNBUFFERED": "1"}
             subprocess.run(
-                [sys.executable, str(s), *args],
+                [sys.executable, "-u", str(s), *args],
                 cwd=str(rd),
                 check=True,
-                env=rvc_env,
+                env=env,
             )
         else:
             log.warning(f"Script not found: {s}")
 
-    _run(
-        "infer/modules/train/preprocess.py",
-        str(gt),
-        str(config.RVC_SAMPLE_RATE),
-        "4",
-        str(exp),
-        "False",
-        "3.7",
-        hint=f"RVC: preprocessing audio slices (sample_rate={config.RVC_SAMPLE_RATE}) …",
-    )
-    _run(
-        "infer/modules/train/extract/extract_f0_print.py",
-        str(exp),
-        "4",
-        config.RVC_F0_METHOD,
-        hint=(
-            "RVC: extracting F0 (rmvpe loads a large model per worker on CPU — "
-            "often several minutes with little terminal output). "
-            f"Tail log: {exp / 'extract_f0_feature.log'}"
-        ),
-    )
-    _run(
-        "infer/modules/train/extract_feature_print.py",
-        "cuda",  # GPU device - uses CUDA_VISIBLE_DEVICES set above
-        "1",
-        "0",
-        str(exp),
-        rvc_version,
-        "true",
-        hint="RVC: extracting HuBERT features (GPU if available; may be slow on CPU) …",
-    )
+    if need_reprocess:
+        # Create/overwrite config.json when reprocessing (ensures sample rate consistency)
+        if config_template.exists():
+            import json
+            with open(config_template, "r") as f:
+                config_data = json.load(f)
+            # Fix sample rate mismatch: ensure config matches target sample rate
+            if config_data.get("data", {}).get("sampling_rate") != sr:
+                original_sr = config_data.get("data", {}).get("sampling_rate")
+                config_data["data"]["sampling_rate"] = sr
+                log.info(f"Adjusted config sampling_rate from {original_sr} to {sr}")
+            with open(config_json, "w") as f:
+                json.dump(config_data, f, indent=4)
+            log.info(f"Created config.json from {config_template}")
+        else:
+            raise FileNotFoundError(f"Config template not found: {config_template}")
+
+        _run(
+            "infer/modules/train/preprocess.py",
+            str(gt),
+            str(config.RVC_SAMPLE_RATE),
+            "4",
+            str(exp),
+            "False",
+            "3.7",
+            hint=f"RVC: preprocessing audio slices (sample_rate={config.RVC_SAMPLE_RATE}) …",
+        )
+        _run(
+            "infer/modules/train/extract/extract_f0_print.py",
+            str(exp),
+            "4",
+            config.RVC_F0_METHOD,
+            hint=(
+                "RVC: extracting F0 (rmvpe loads a large model per worker on CPU — "
+                "often several minutes with little terminal output). "
+                f"Tail log: {exp / 'extract_f0_feature.log'}"
+            ),
+        )
+        _run(
+            "infer/modules/train/extract_feature_print.py",
+            "cuda",  # GPU device - uses CUDA_VISIBLE_DEVICES set above
+            "1",
+            "0",
+            str(exp),
+            rvc_version,
+            "true",
+            hint="RVC: extracting HuBERT features (GPU if available; may be slow on CPU) …",
+        )
 
     # Generate filelist.txt required by train.py
     _generate_filelist(exp, rvc_version, config.RVC_SAMPLE_RATE)
