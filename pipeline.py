@@ -505,21 +505,21 @@ def _train_rvc_repo(quick=False):
     # Use minimal epochs for quick debugging
     training_epochs = 2 if quick else config.RVC_TRAINING_EPOCHS
     
-    # Clear existing checkpoints if target epoch is less than current checkpoint epoch
-    # RVC auto-resumes from latest checkpoint, so we need to clear when restarting with fewer epochs
-    existing_ckpt = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if existing_ckpt:
-        import torch
+    # Clear existing checkpoints if target epoch <= current checkpoint epoch
+    # RVC auto-resumes from latest checkpoint; its key is "iteration" (which stores the epoch number)
+    existing_ckpts = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if existing_ckpts:
+        import torch as _torch
         try:
-            ckpt = torch.load(existing_ckpt[0], map_location="cpu", weights_only=False)
-            existing_epoch = ckpt.get("epoch", 0)
+            ckpt = _torch.load(existing_ckpts[0], map_location="cpu", weights_only=False)
+            existing_epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
+            log.info(f"Found existing checkpoint: {existing_ckpts[0].name} (epoch {existing_epoch}), target epochs: {training_epochs}")
             if existing_epoch >= training_epochs:
-                log.info(f"Clearing existing checkpoints (epoch {existing_epoch} >= target {training_epochs})")
-                for f in exp.glob("G_*.pth"):
+                log.info(f"Clearing old checkpoints (epoch {existing_epoch} >= target {training_epochs}) to allow fresh training")
+                for f in list(exp.glob("G_*.pth")) + list(exp.glob("D_*.pth")):
+                    log.info(f"  Removing {f.name}")
                     f.unlink()
-                for f in exp.glob("D_*.pth"):
-                    f.unlink()
-                log.info("Cleared G_*.pth and D_*.pth checkpoints")
+                log.info("Checkpoint cleanup done — training will start from pretrained weights")
         except Exception as e:
             log.warning(f"Could not read checkpoint epoch: {e}")
     
