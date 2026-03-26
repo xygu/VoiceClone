@@ -122,10 +122,14 @@ def step_separate():
 
 
 # ── STEP 3  Train RVC model ─────────────────────────────────────────────────
-def step_train():
-    """Train a voice model (RVC) or skip when using passthrough backend."""
+def step_train(quick=False):
+    """Train a voice model (RVC) or skip when using passthrough backend.
+    
+    Args:
+        quick: If True, use minimal epochs (2) for fast debugging of subsequent steps.
+    """
     log.info("=" * 60)
-    log.info("STEP 3: Train voice model")
+    log.info("STEP 3: Train voice model" + (" (QUICK MODE - 2 epochs)" if quick else ""))
     log.info("=" * 60)
 
     if getattr(config, "VOICE_CONVERSION_BACKEND", "rvc") == "passthrough":
@@ -188,10 +192,10 @@ def step_train():
                     "RVC_SLICE_AUDIO=False. "
                     "Please enable slicing once or place pre-sliced wav files there."
                 )
-        _train_rvc_python(sliced_dir)
+        _train_rvc_python(sliced_dir, quick=quick)
     except ImportError:
         # Use original audio file directly for RVC repo method (preserves quality)
-        _train_rvc_repo()
+        _train_rvc_repo(quick=quick)
 
     log.info("STEP 3 COMPLETE")
 
@@ -230,15 +234,16 @@ def _slice_audio(src, dst, seg_len=10.0, sr=40000):
     log.info(f"Sliced into {len(list(dst.glob('*.wav')))} segments")
 
 
-def _train_rvc_python(sliced_dir):
+def _train_rvc_python(sliced_dir, quick=False):
     from rvc_python import RVC
     rvc = RVC()
+    epochs = 2 if quick else config.RVC_TRAINING_EPOCHS
     rvc.train(
         dataset_path=str(sliced_dir),
         model_name=config.RVC_MODEL_NAME,
         sample_rate=config.RVC_SAMPLE_RATE,
         f0_method=config.RVC_F0_METHOD,
-        epochs=config.RVC_TRAINING_EPOCHS,
+        epochs=epochs,
         batch_size=config.RVC_BATCH_SIZE,
     )
 
@@ -325,7 +330,7 @@ def _detect_audio_sr(filepath):
             return None
 
 
-def _train_rvc_repo():
+def _train_rvc_repo(quick=False):
     rd = config.RVC_REPO_DIR
     exp = rd / "logs" / config.RVC_MODEL_NAME
     exp.mkdir(parents=True, exist_ok=True)
@@ -497,6 +502,9 @@ def _train_rvc_repo():
     # Convert sample rate to RVC format (e.g., 48000 -> "48k")
     sr_for_rvc = f"{config.RVC_SAMPLE_RATE // 1000}k"
     
+    # Use minimal epochs for quick debugging
+    training_epochs = 2 if quick else config.RVC_TRAINING_EPOCHS
+    
     _run(
         "infer/modules/train/train.py",
         "-e",
@@ -506,7 +514,7 @@ def _train_rvc_repo():
         "-bs",
         str(config.RVC_BATCH_SIZE),
         "-te",
-        str(config.RVC_TRAINING_EPOCHS),
+        str(training_epochs),
         "-se",
         "50",
         "-pg",
@@ -521,7 +529,7 @@ def _train_rvc_repo():
         "1",
         "-c",
         "0",
-        hint=f"RVC: training (epochs={config.RVC_TRAINING_EPOCHS}, batch_size={config.RVC_BATCH_SIZE}) — longest step …",
+        hint=f"RVC: training (epochs={training_epochs}, batch_size={config.RVC_BATCH_SIZE}) — longest step …",
     )
 
     for pat, dst in [("G_*.pth", config.RVC_TRAINED_MODEL), ("*.index", config.RVC_TRAINED_INDEX)]:
@@ -662,20 +670,21 @@ def main():
     p.add_argument("--train",     action="store_true", help="Step 3: Train voice model (RVC; skipped if passthrough)")
     p.add_argument("--convert",   action="store_true", help="Step 4: Convert vocals (or passthrough copy)")
     p.add_argument("--mix",       action="store_true", help="Step 5: Mix final output")
+    p.add_argument("--quick",     action="store_true", help="Quick mode: use minimal training epochs (2) for fast debugging")
     p.add_argument("--cookies-from-browser", type=str, metavar="BROWSER",
                    help="Browser to extract cookies from for YouTube authentication (e.g., chrome, safari, firefox)")
     p.add_argument("--cookies-file", type=str, metavar="FILE",
                    help="Path to cookies file for YouTube authentication (exported from browser extension)")
     args = p.parse_args()
 
-    if not any(v for k, v in vars(args).items() if k not in ("cookies_from_browser", "cookies_file")):
+    if not any(v for k, v in vars(args).items() if k not in ("cookies_from_browser", "cookies_file", "quick")):
         p.print_help()
         return
 
     steps = []
     if args.all or args.download:  steps.append(("Download",  lambda: step_download(args.cookies_from_browser, args.cookies_file)))
     if args.all or args.separate:  steps.append(("Separate",  step_separate))
-    if args.all or args.train:     steps.append(("Train",     step_train))
+    if args.all or args.train:     steps.append(("Train",     lambda: step_train(quick=args.quick)))
     if args.all or args.convert:   steps.append(("Convert",   step_convert))
     if args.all or args.mix:       steps.append(("Mix",       step_mix))
 

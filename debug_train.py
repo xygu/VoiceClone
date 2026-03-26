@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quick debug script to run only RVC training step (Step 3).
+Quick debug script to run only RVC training step (Step 3) with minimal epochs.
 This skips download and separation to quickly get to the training error.
 
 Usage:
@@ -9,6 +9,8 @@ Usage:
 Requirements:
     - input/myshot.m4a (or my_shot_original.mp3) must exist
     - RVC repo must be present at rvc_workspace/Retrieval-based-Voice-Conversion-WebUI/
+
+Note: This is equivalent to running: python pipeline.py --train --quick
 """
 
 import sys
@@ -47,7 +49,7 @@ def _detect_audio_sr(filepath):
 
 if __name__ == "__main__":
     log.info("=" * 60)
-    log.info("DEBUG: Running only Step 3 (Train)")
+    log.info("DEBUG: Running Step 3 (Train) in QUICK mode (2 epochs)")
     log.info("=" * 60)
     
     # Log audio file information
@@ -71,7 +73,7 @@ if __name__ == "__main__":
     from pipeline import step_train
     
     try:
-        step_train()
+        step_train(quick=True)
         log.info("=" * 60)
         log.info("DEBUG: Training completed successfully!")
         log.info("=" * 60)
