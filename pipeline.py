@@ -31,6 +31,100 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config
 
 
+# ── Checkpoint Conversion ─────────────────────────────────────────────────────
+def _convert_checkpoint_to_inference_model(ckpt_path, output_path, sr, version="v2"):
+    """
+    Convert intermediate training checkpoint to inference model format.
+    
+    Intermediate format: {"model": state_dict, "iteration": int, "optimizer": ..., "learning_rate": ...}
+    Inference format: {"weight": state_dict, "config": [...], "sr": str, "f0": int, "version": str}
+    """
+    import torch
+    from collections import OrderedDict
+    
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    
+    if "config" in ckpt:
+        # Already in inference format
+        return ckpt
+    
+    if "model" not in ckpt:
+        raise ValueError(f"Checkpoint {ckpt_path} has unexpected format: {list(ckpt.keys())}")
+    
+    # Convert to inference format
+    opt = OrderedDict()
+    opt["weight"] = {}
+    for key in ckpt["model"].keys():
+        if "enc_q" in key:
+            continue
+        opt["weight"][key] = ckpt["model"][key].half()
+    
+    # Config depends on sample rate and version
+    sr_int = int(sr.replace("k", "000"))
+    if sr == "40k":
+        opt["config"] = [
+            1025, 32, 192, 192, 768, 2, 6, 3, 0, "1",
+            [3, 7, 11], [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+            [10, 10, 2, 2], 512, [16, 16, 4, 4], 109, 256, 40000,
+        ]
+    elif sr == "48k":
+        if version == "v1":
+            opt["config"] = [
+                1025, 32, 192, 192, 768, 2, 6, 3, 0, "1",
+                [3, 7, 11], [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                [10, 6, 2, 2, 2], 512, [16, 16, 4, 4, 4], 109, 256, 48000,
+            ]
+        else:  # v2
+            opt["config"] = [
+                1025, 32, 192, 192, 768, 2, 6, 3, 0, "1",
+                [3, 7, 11], [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                [12, 10, 2, 2], 512, [24, 20, 4, 4], 109, 256, 48000,
+            ]
+    elif sr == "32k":
+        if version == "v1":
+            opt["config"] = [
+                513, 32, 192, 192, 768, 2, 6, 3, 0, "1",
+                [3, 7, 11], [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                [10, 4, 2, 2, 2], 512, [16, 16, 4, 4, 4], 109, 256, 32000,
+            ]
+        else:  # v2
+            opt["config"] = [
+                513, 32, 192, 192, 768, 2, 6, 3, 0, "1",
+                [3, 7, 11], [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                [10, 8, 2, 2], 512, [20, 16, 4, 4], 109, 256, 32000,
+            ]
+    else:
+        raise ValueError(f"Unsupported sample rate: {sr}")
+    
+    epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
+    opt["info"] = f"{epoch}epoch"
+    opt["sr"] = sr
+    opt["f0"] = 1
+    opt["version"] = version
+    
+    torch.save(opt, output_path)
+    log.info(f"Converted checkpoint: {ckpt_path} -> {output_path} (sr={sr}, version={version}, epoch={epoch})")
+    return opt
+
+
+def _get_training_config(exp_dir):
+    """Get sample rate and version from experiment config.json or infer from checkpoints."""
+    import json
+    
+    config_path = exp_dir / "config.json"
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            cfg = json.load(f)
+        sr = cfg.get("data", {}).get("sampling_rate", 40000)
+        sr_str = f"{sr // 1000}k"
+        # Infer version from config structure
+        version = "v2"  # Default to v2
+        return sr_str, version
+    
+    # Fallback: try to infer from checkpoint shapes
+    return None, None
+
+
 # ── STEP 1  Download ────────────────────────────────────────────────────────
 def step_download(cookies_from_browser=None, cookies_file=None):
     """Download Hamilton 'My Shot' from YouTube → MP3 + WAV."""
@@ -554,22 +648,78 @@ def _train_rvc_repo(quick=False):
     # This has the correct format: {"weight": ..., "config": [...], "f0": ..., "version": ...}
     # The G_*.pth files are intermediate checkpoints with wrong format: {"model": ..., "iteration": ...}
     final_model_in_rvc = rd / "assets" / "weights" / f"{config.RVC_MODEL_NAME}.pth"
+    weights_dir = rd / "assets" / "weights"
+    weights_dir.mkdir(parents=True, exist_ok=True)
     
+    # Get training config (sample rate, version)
+    sr_str, version = _get_training_config(exp)
+    if sr_str is None:
+        # Fallback to config.py settings
+        sr_str = f"{config.RVC_SAMPLE_RATE // 1000}k"
+        version = "v2" if config.RVC_SAMPLE_RATE >= 48000 else "v1"
+    
+    # Check if final model exists and has correct format
+    import torch
+    use_final_model = False
     if final_model_in_rvc.exists():
-        # Use the final model saved by savee() - correct format for inference
+        try:
+            ckpt = torch.load(final_model_in_rvc, map_location="cpu", weights_only=False)
+            if "config" in ckpt:
+                use_final_model = True
+                log.info(f"Using final model from RVC: {final_model_in_rvc}")
+        except Exception as e:
+            log.warning(f"Could not load {final_model_in_rvc}: {e}")
+    
+    if use_final_model:
         shutil.copy2(final_model_in_rvc, config.RVC_TRAINED_MODEL)
-        log.info(f"Copied final model from RVC: {final_model_in_rvc} -> {config.RVC_TRAINED_MODEL}")
+        log.info(f"Copied final model: {final_model_in_rvc} -> {config.RVC_TRAINED_MODEL}")
     else:
-        # Fallback: try to find G_*.pth and warn about format
+        # Find and convert intermediate checkpoint
         g_files = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime)
-        if g_files:
-            log.warning(f"Final model not found at {final_model_in_rvc}")
-            log.warning(f"Copying intermediate checkpoint {g_files[-1]} (may have compatibility issues)")
-            shutil.copy2(g_files[-1], config.RVC_TRAINED_MODEL)
-        else:
+        if not g_files:
             raise FileNotFoundError(
                 f"No model checkpoint found. Expected {final_model_in_rvc} or G_*.pth in {exp}"
             )
+        
+        # Select checkpoint based on RVC_CHECKPOINT_EPOCH
+        target_epoch = getattr(config, "RVC_CHECKPOINT_EPOCH", None)
+        selected_ckpt = None
+        
+        if target_epoch is not None:
+            # Find specific epoch
+            for f in g_files:
+                try:
+                    ckpt = torch.load(f, map_location="cpu", weights_only=False)
+                    epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
+                    if epoch == target_epoch:
+                        selected_ckpt = f
+                        break
+                except:
+                    continue
+            
+            if selected_ckpt is None:
+                log.warning(f"Checkpoint with epoch {target_epoch} not found, using latest")
+        
+        if selected_ckpt is None:
+            # Use latest checkpoint (highest epoch number, sorted by mtime gives last = newest)
+            selected_ckpt = g_files[-1]
+            # Verify and get epoch
+            ckpt = torch.load(selected_ckpt, map_location="cpu", weights_only=False)
+            epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
+            log.info(f"Using latest checkpoint: {selected_ckpt.name} (epoch {epoch})")
+        
+        # Convert to inference format
+        log.info(f"Converting checkpoint to inference model (sr={sr_str}, version={version})...")
+        _convert_checkpoint_to_inference_model(
+            selected_ckpt, 
+            final_model_in_rvc, 
+            sr_str, 
+            version
+        )
+        
+        # Copy to project directory
+        shutil.copy2(final_model_in_rvc, config.RVC_TRAINED_MODEL)
+        log.info(f"Saved inference model: {config.RVC_TRAINED_MODEL}")
     
     # Copy index file if exists (improves voice similarity)
     index_files = sorted(exp.glob("*.index"), key=lambda p: p.stat().st_mtime)
@@ -634,59 +784,79 @@ def _convert_rvc_repo():
         infer_cli = rd / "infer" / "modules" / "vc" / "pipeline.py"
         log.warning(f"Using alternative infer path: {infer_cli}")
 
-    # The correct final model is saved by savee() to assets/weights/my_voice.pth
-    # This has format: {"weight": ..., "config": [...], "f0": ..., "version": ...}
-    # RVC_TRAINED_MODEL (copied from G_*.pth) may have wrong format: {"model": ..., "iteration": ...}
     weights_dir = rd / "assets" / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
     
     final_model_in_rvc = weights_dir / f"{config.RVC_MODEL_NAME}.pth"
     model_filename = f"{config.RVC_MODEL_NAME}.pth"
     
-    # Prefer the model in RVC's weights directory (correct format from savee())
-    # Fall back to RVC_TRAINED_MODEL if not found
-    if final_model_in_rvc.exists():
-        # Verify it has correct format
-        import torch
+    import torch
+    
+    # Helper to check if model has correct format
+    def has_correct_format(path):
+        if not path.exists():
+            return False
         try:
-            ckpt = torch.load(final_model_in_rvc, map_location="cpu", weights_only=False)
-            if "config" in ckpt:
-                log.info(f"Using final model from RVC weights: {final_model_in_rvc}")
-            else:
-                log.warning(f"Model at {final_model_in_rvc} has wrong format, checking RVC_TRAINED_MODEL")
-                raise KeyError("config not found")
-        except Exception as e:
-            # Try RVC_TRAINED_MODEL as fallback
-            if config.RVC_TRAINED_MODEL.exists():
-                ckpt2 = torch.load(config.RVC_TRAINED_MODEL, map_location="cpu", weights_only=False)
-                if "config" in ckpt2:
-                    shutil.copy2(config.RVC_TRAINED_MODEL, final_model_in_rvc)
-                    log.info(f"Used fallback model: {config.RVC_TRAINED_MODEL}")
-                else:
-                    raise FileNotFoundError(
-                        f"Neither {final_model_in_rvc} nor {config.RVC_TRAINED_MODEL} has correct format. "
-                        "Re-run training to generate a valid model."
-                    )
-            else:
-                raise FileNotFoundError(f"No valid model found. {e}")
-    elif config.RVC_TRAINED_MODEL.exists():
-        # Check format and copy if valid
-        import torch
-        ckpt = torch.load(config.RVC_TRAINED_MODEL, map_location="cpu", weights_only=False)
-        if "config" in ckpt:
-            shutil.copy2(config.RVC_TRAINED_MODEL, final_model_in_rvc)
-            log.info(f"Copied model from: {config.RVC_TRAINED_MODEL}")
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+            return "config" in ckpt
+        except:
+            return False
+    
+    # Try to find a valid model, converting if necessary
+    model_path = None
+    
+    if has_correct_format(final_model_in_rvc):
+        log.info(f"Using final model from RVC weights: {final_model_in_rvc}")
+        model_path = final_model_in_rvc
+    elif has_correct_format(config.RVC_TRAINED_MODEL):
+        log.info(f"Using model from project directory: {config.RVC_TRAINED_MODEL}")
+        shutil.copy2(config.RVC_TRAINED_MODEL, final_model_in_rvc)
+        model_path = final_model_in_rvc
+    else:
+        # Need to convert intermediate checkpoint
+        log.warning("No valid inference model found, looking for intermediate checkpoints...")
+        
+        exp = rd / "logs" / config.RVC_MODEL_NAME
+        g_files = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime) if exp.exists() else []
+        
+        if g_files:
+            # Get training config
+            sr_str, version = _get_training_config(exp)
+            if sr_str is None:
+                sr_str = f"{config.RVC_SAMPLE_RATE // 1000}k"
+                version = "v2"
+            
+            # Select checkpoint based on RVC_CHECKPOINT_EPOCH
+            target_epoch = getattr(config, "RVC_CHECKPOINT_EPOCH", None)
+            selected_ckpt = None
+            
+            if target_epoch is not None:
+                for f in g_files:
+                    try:
+                        ckpt = torch.load(f, map_location="cpu", weights_only=False)
+                        epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
+                        if epoch == target_epoch:
+                            selected_ckpt = f
+                            break
+                    except:
+                        continue
+                if selected_ckpt is None:
+                    log.warning(f"Checkpoint with epoch {target_epoch} not found, using latest")
+            
+            if selected_ckpt is None:
+                selected_ckpt = g_files[-1]
+                ckpt = torch.load(selected_ckpt, map_location="cpu", weights_only=False)
+                epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
+                log.info(f"Using latest checkpoint: {selected_ckpt.name} (epoch {epoch})")
+            
+            log.info(f"Converting checkpoint to inference model (sr={sr_str}, version={version})...")
+            _convert_checkpoint_to_inference_model(selected_ckpt, final_model_in_rvc, sr_str, version)
+            model_path = final_model_in_rvc
         else:
             raise FileNotFoundError(
-                f"Model at {config.RVC_TRAINED_MODEL} has wrong format (missing 'config' key). "
-                "Re-run training with --train to generate a valid model."
+                f"No valid model found. Run --train to generate a model."
             )
-    else:
-        raise FileNotFoundError(
-            f"No model found. Expected {final_model_in_rvc} or {config.RVC_TRAINED_MODEL}. "
-            "Run --train first."
-        )
-
+    
     # Check for index file (optional but improves quality)
     index_file = config.RVC_TRAINED_INDEX
     if index_file.exists():

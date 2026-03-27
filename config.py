@@ -88,6 +88,11 @@ RVC_BATCH_SIZE = 32  # Optimized for 80GB VRAM (A800): 32-64 works well
 RVC_MODEL_NAME = "my_voice"
 RVC_SPEAKER_ID = 0
 
+# Checkpoint selection for inference
+# None = use latest available checkpoint (highest epoch number)
+# Or specify an epoch number, e.g., 800, 1200, 1600
+RVC_CHECKPOINT_EPOCH = None
+
 # GPU Configuration
 # Set to specific GPU index (e.g., "0") or "auto" to use first available
 # For multi-GPU servers, you can distribute training by setting different indices
