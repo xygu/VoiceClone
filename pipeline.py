@@ -878,13 +878,16 @@ def _convert_rvc_repo(model_path, index_path=None):
         )
     log.info(f"Input vocals: {config.SEPARATED_VOCALS}")
 
-    # Set weight_root and index_root environment variables (required by infer_cli.py)
+    # Set RVC environment variables (required by infer_cli.py)
     index_dir = rd / "assets" / "indices"
     index_dir.mkdir(parents=True, exist_ok=True)
+    rmvpe_dir = rd / "assets" / "rmvpe"
+    rmvpe_dir.mkdir(parents=True, exist_ok=True)
     rvc_env = {
         **os.environ,
         "weight_root": str(weights_dir),
         "index_root": str(index_dir),
+        "rmvpe_root": str(rmvpe_dir),
         "PYTHONUNBUFFERED": "1",
     }
 
