@@ -681,32 +681,10 @@ def _train_rvc_repo(quick=False):
                 f"No model checkpoint found. Expected {final_model_in_rvc} or G_*.pth in {exp}"
             )
         
-        # Select checkpoint based on RVC_CHECKPOINT_EPOCH
-        target_epoch = getattr(config, "RVC_CHECKPOINT_EPOCH", None)
-        selected_ckpt = None
-        
-        if target_epoch is not None:
-            # Find specific epoch
-            for f in g_files:
-                try:
-                    ckpt = torch.load(f, map_location="cpu", weights_only=False)
-                    epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
-                    if epoch == target_epoch:
-                        selected_ckpt = f
-                        break
-                except:
-                    continue
-            
-            if selected_ckpt is None:
-                log.warning(f"Checkpoint with epoch {target_epoch} not found, using latest")
-        
-        if selected_ckpt is None:
-            # Use latest checkpoint (highest epoch number, sorted by mtime gives last = newest)
-            selected_ckpt = g_files[-1]
-            # Verify and get epoch
-            ckpt = torch.load(selected_ckpt, map_location="cpu", weights_only=False)
-            epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
-            log.info(f"Using latest checkpoint: {selected_ckpt.name} (epoch {epoch})")
+        # Use latest checkpoint by file modification time
+        g_files_sorted = sorted(g_files, key=lambda p: p.stat().st_mtime, reverse=True)
+        selected_ckpt = g_files_sorted[0]
+        log.info(f"Using latest checkpoint: {selected_ckpt.name}")
         
         # Convert to inference format
         log.info(f"Converting checkpoint to inference model (sr={sr_str}, version={version})...")
@@ -729,7 +707,7 @@ def _train_rvc_repo(quick=False):
 
 
 # ── STEP 4  Voice conversion (inference) ────────────────────────────────────
-def step_convert():
+def step_convert(ckpt_filename=None):
     """Convert separated vocals to user's timbre (RVC) or copy through (passthrough)."""
     log.info("=" * 60)
     log.info("STEP 4: Voice conversion")
@@ -754,7 +732,7 @@ def step_convert():
     try:
         _convert_rvc_python()
     except ImportError:
-        _convert_rvc_repo()
+        _convert_rvc_repo(ckpt_filename=ckpt_filename)
 
     log.info(f"Converted vocals → {config.CONVERTED_VOCALS}")
     log.info("STEP 4 COMPLETE")
@@ -776,7 +754,7 @@ def _convert_rvc_python():
     )
 
 
-def _convert_rvc_repo():
+def _convert_rvc_repo(ckpt_filename=None):
     rd = config.RVC_REPO_DIR
     infer_cli = rd / "tools" / "infer_cli.py"
     if not infer_cli.exists():
@@ -826,28 +804,23 @@ def _convert_rvc_repo():
                 sr_str = f"{config.RVC_SAMPLE_RATE // 1000}k"
                 version = "v2"
             
-            # Select checkpoint based on RVC_CHECKPOINT_EPOCH
-            target_epoch = getattr(config, "RVC_CHECKPOINT_EPOCH", None)
+            # Select checkpoint based on --ckpt filename
             selected_ckpt = None
             
-            if target_epoch is not None:
-                for f in g_files:
-                    try:
-                        ckpt = torch.load(f, map_location="cpu", weights_only=False)
-                        epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
-                        if epoch == target_epoch:
-                            selected_ckpt = f
-                            break
-                    except:
-                        continue
-                if selected_ckpt is None:
-                    log.warning(f"Checkpoint with epoch {target_epoch} not found, using latest")
+            if ckpt_filename is not None:
+                # Find by filename
+                selected_ckpt = exp / ckpt_filename
+                if not selected_ckpt.exists():
+                    log.warning(f"Checkpoint {ckpt_filename} not found in {exp}")
+                    selected_ckpt = None
+                else:
+                    log.info(f"Using specified checkpoint: {ckpt_filename}")
             
             if selected_ckpt is None:
-                selected_ckpt = g_files[-1]
-                ckpt = torch.load(selected_ckpt, map_location="cpu", weights_only=False)
-                epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
-                log.info(f"Using latest checkpoint: {selected_ckpt.name} (epoch {epoch})")
+                # Use latest checkpoint by file modification time
+                g_files_sorted = sorted(g_files, key=lambda p: p.stat().st_mtime, reverse=True)
+                selected_ckpt = g_files_sorted[0]
+                log.info(f"Using latest checkpoint: {selected_ckpt.name}")
             
             log.info(f"Converting checkpoint to inference model (sr={sr_str}, version={version})...")
             _convert_checkpoint_to_inference_model(selected_ckpt, final_model_in_rvc, sr_str, version)
@@ -965,13 +938,15 @@ def main():
     p.add_argument("--convert",   action="store_true", help="Step 4: Convert vocals (or passthrough copy)")
     p.add_argument("--mix",       action="store_true", help="Step 5: Mix final output")
     p.add_argument("--quick",     action="store_true", help="Quick mode: use minimal training epochs (2) for fast debugging")
+    p.add_argument("--ckpt", type=str, metavar="FILENAME", default=None,
+                   help="Checkpoint filename to use for inference (e.g., G_1600.pth). Default: use latest.")
     p.add_argument("--cookies-from-browser", type=str, metavar="BROWSER",
                    help="Browser to extract cookies from for YouTube authentication (e.g., chrome, safari, firefox)")
     p.add_argument("--cookies-file", type=str, metavar="FILE",
                    help="Path to cookies file for YouTube authentication (exported from browser extension)")
     args = p.parse_args()
 
-    if not any(v for k, v in vars(args).items() if k not in ("cookies_from_browser", "cookies_file", "quick")):
+    if not any(v for k, v in vars(args).items() if k not in ("cookies_from_browser", "cookies_file", "quick", "ckpt")):
         p.print_help()
         return
 
@@ -979,7 +954,7 @@ def main():
     if args.all or args.download:  steps.append(("Download",  lambda: step_download(args.cookies_from_browser, args.cookies_file)))
     if args.all or args.separate:  steps.append(("Separate",  step_separate))
     if args.all or args.train:     steps.append(("Train",     lambda: step_train(quick=args.quick)))
-    if args.all or args.convert:   steps.append(("Convert",   step_convert))
+    if args.all or args.convert:   steps.append(("Convert",   lambda: step_convert(ckpt_filename=args.ckpt)))
     if args.all or args.mix:       steps.append(("Mix",       step_mix))
 
     for name, fn in steps:
