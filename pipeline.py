@@ -621,6 +621,9 @@ def _convert_rvc_repo():
         shutil.copy2(config.RVC_TRAINED_MODEL, weights_model)
         log.info(f"Copied model to RVC weights: {weights_model}")
 
+    # Set weight_root environment variable (required by infer_cli.py)
+    rvc_env = {**os.environ, "weight_root": str(weights_dir), "PYTHONUNBUFFERED": "1"}
+
     cmd = [
         sys.executable, str(infer_cli),
         "--model_name", model_name,
@@ -639,7 +642,7 @@ def _convert_rvc_repo():
         cmd,
         cwd=str(rd),
         check=True,
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env=rvc_env,
     )
 
 
