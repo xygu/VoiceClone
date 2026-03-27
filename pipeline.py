@@ -663,24 +663,6 @@ def _train_rvc_repo(quick=False):
     # Use minimal epochs for quick debugging
     training_epochs = 2 if quick else config.RVC_TRAINING_EPOCHS
     
-    # Clear existing checkpoints if target epoch <= current checkpoint epoch
-    # RVC auto-resumes from latest checkpoint; its key is "iteration" (which stores the epoch number)
-    existing_ckpts = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if existing_ckpts:
-        import torch as _torch
-        try:
-            ckpt = _torch.load(existing_ckpts[0], map_location="cpu", weights_only=False)
-            existing_epoch = ckpt.get("iteration", ckpt.get("epoch", 0))
-            log.info(f"Found existing checkpoint: {existing_ckpts[0].name} (epoch {existing_epoch}), target epochs: {training_epochs}")
-            if existing_epoch >= training_epochs:
-                log.info(f"Clearing old checkpoints (epoch {existing_epoch} >= target {training_epochs}) to allow fresh training")
-                for f in list(exp.glob("G_*.pth")) + list(exp.glob("D_*.pth")):
-                    log.info(f"  Removing {f.name}")
-                    f.unlink()
-                log.info("Checkpoint cleanup done — training will start from pretrained weights")
-        except Exception as e:
-            log.warning(f"Could not read checkpoint epoch: {e}")
-    
     _run(
         "infer/modules/train/train.py",
         "-e",
@@ -896,8 +878,15 @@ def _convert_rvc_repo(model_path, index_path=None):
         )
     log.info(f"Input vocals: {config.SEPARATED_VOCALS}")
 
-    # Set weight_root environment variable (required by infer_cli.py)
-    rvc_env = {**os.environ, "weight_root": str(weights_dir), "PYTHONUNBUFFERED": "1"}
+    # Set weight_root and index_root environment variables (required by infer_cli.py)
+    index_dir = rd / "assets" / "indices"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    rvc_env = {
+        **os.environ,
+        "weight_root": str(weights_dir),
+        "index_root": str(index_dir),
+        "PYTHONUNBUFFERED": "1",
+    }
 
     cmd = [
         sys.executable, str(infer_cli),
