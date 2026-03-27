@@ -775,20 +775,10 @@ def step_convert(exp_dir=None):
     log.info("STEP 4: Voice conversion")
     log.info("=" * 60)
 
-    if config.CONVERTED_VOCALS.exists():
-        log.info("Converted vocals exist — skipping.")
-        return
     if not config.SEPARATED_VOCALS.exists():
         raise FileNotFoundError("Run --separate first.")
 
-    if getattr(config, "VOICE_CONVERSION_BACKEND", "rvc") == "passthrough":
-        log.info("VOICE_CONVERSION_BACKEND=passthrough — copying separated vocals (no RVC).")
-        shutil.copy2(config.SEPARATED_VOCALS, config.CONVERTED_VOCALS)
-        log.info(f"Vocals (unchanged timbre) → {config.CONVERTED_VOCALS}")
-        log.info("STEP 4 COMPLETE")
-        return
-
-    # Find model from experiment directory
+    # Determine output directory: exp/{timestamp}/
     if exp_dir is None:
         exp_dir = _get_latest_exp_dir()
         if exp_dir is None:
@@ -803,6 +793,21 @@ def step_convert(exp_dir=None):
             raise FileNotFoundError(f"Specified experiment directory not found: {exp_dir}")
         log.info(f"Using specified experiment directory: {exp_dir}")
     
+    # Output path: exp/{timestamp}/vocals_converted.wav
+    output_path = exp_dir / "vocals_converted.wav"
+    
+    # Always overwrite - remove existing file if present
+    if output_path.exists():
+        log.info(f"Removing existing converted vocals: {output_path}")
+        output_path.unlink()
+
+    if getattr(config, "VOICE_CONVERSION_BACKEND", "rvc") == "passthrough":
+        log.info("VOICE_CONVERSION_BACKEND=passthrough — copying separated vocals (no RVC).")
+        shutil.copy2(config.SEPARATED_VOCALS, output_path)
+        log.info(f"Vocals (unchanged timbre) → {output_path}")
+        log.info("STEP 4 COMPLETE")
+        return
+
     # Find model file in experiment directory
     model_path = _find_pth_in_exp_dir(exp_dir)
     if model_path is None:
@@ -815,26 +820,29 @@ def step_convert(exp_dir=None):
         log.warning("No index file found in experiment directory (quality may be reduced)")
 
     try:
-        _convert_rvc_python(model_path, index_path)
+        _convert_rvc_python(model_path, index_path, output_path)
     except ImportError:
-        _convert_rvc_repo(model_path, index_path)
+        _convert_rvc_repo(model_path, index_path, output_path)
 
-    log.info(f"Converted vocals → {config.CONVERTED_VOCALS}")
+    log.info(f"Converted vocals → {output_path}")
     log.info("STEP 4 COMPLETE")
 
 
-def _convert_rvc_python(model_path, index_path=None):
+def _convert_rvc_python(model_path, index_path=None, output_path=None):
     """Convert vocals using rvc_python library.
     
     Args:
         model_path: Path to the .pth model file
         index_path: Path to the .index file (optional)
+        output_path: Path for the output converted vocals (default: config.CONVERTED_VOCALS)
     """
     from rvc_python import RVC
+    if output_path is None:
+        output_path = config.CONVERTED_VOCALS
     rvc = RVC(model_path=str(model_path))
     rvc.convert(
         input_path=str(config.SEPARATED_VOCALS),
-        output_path=str(config.CONVERTED_VOCALS),
+        output_path=str(output_path),
         f0_method=config.RVC_F0_METHOD,
         f0_up_key=config.RVC_TRANSPOSE,
         index_path=str(index_path) if index_path and index_path.exists() else None,
@@ -845,13 +853,17 @@ def _convert_rvc_python(model_path, index_path=None):
     )
 
 
-def _convert_rvc_repo(model_path, index_path=None):
+def _convert_rvc_repo(model_path, index_path=None, output_path=None):
     """Convert vocals using RVC repository's infer_cli.py.
     
     Args:
         model_path: Path to the .pth model file
         index_path: Path to the .index file (optional)
+        output_path: Path for the output converted vocals (default: config.CONVERTED_VOCALS)
     """
+    if output_path is None:
+        output_path = config.CONVERTED_VOCALS
+    
     rd = config.RVC_REPO_DIR
     infer_cli = rd / "tools" / "infer_cli.py"
     if not infer_cli.exists():
@@ -895,7 +907,7 @@ def _convert_rvc_repo(model_path, index_path=None):
         sys.executable, str(infer_cli),
         "--model_name", model_filename,
         "--input_path", str(config.SEPARATED_VOCALS),
-        "--opt_path", str(config.CONVERTED_VOCALS),
+        "--opt_path", str(output_path),
         "--f0method", config.RVC_F0_METHOD,
         "--f0up_key", str(config.RVC_TRANSPOSE),
         "--index_rate", str(config.RVC_INDEX_RATE),
@@ -920,20 +932,45 @@ def _convert_rvc_repo(model_path, index_path=None):
 
 
 # ── STEP 5  Mix & master ────────────────────────────────────────────────────
-def step_mix():
-    """Mix converted vocals + accompaniment into the final track."""
+def step_mix(exp_dir=None):
+    """Mix converted vocals + accompaniment into the final track.
+    
+    Args:
+        exp_dir: Path to experiment directory containing converted vocals.
+                 If None, automatically finds the latest ./exp/{timestamp}/ directory.
+    """
     log.info("=" * 60)
     log.info("STEP 5: Mixing final output")
     log.info("=" * 60)
 
-    if not config.CONVERTED_VOCALS.exists():
-        raise FileNotFoundError("Run --convert first.")
+    # Determine experiment directory
+    if exp_dir is None:
+        exp_dir = _get_latest_exp_dir()
+        if exp_dir is None:
+            raise FileNotFoundError(
+                f"No experiment directory found under {EXP_DIR}. "
+                "Run --convert first, or specify --ckpt <exp_dir>."
+            )
+        log.info(f"Using latest experiment directory: {exp_dir}")
+    else:
+        exp_dir = Path(exp_dir)
+        if not exp_dir.exists():
+            raise FileNotFoundError(f"Specified experiment directory not found: {exp_dir}")
+        log.info(f"Using specified experiment directory: {exp_dir}")
+    
+    # Look for converted vocals in exp directory
+    converted_vocals_path = exp_dir / "vocals_converted.wav"
+    if not converted_vocals_path.exists():
+        raise FileNotFoundError(
+            f"Converted vocals not found: {converted_vocals_path}. "
+            "Run --convert first."
+        )
     if not config.SEPARATED_ACCOMPANIMENT.exists():
         raise FileNotFoundError("Run --separate first.")
 
     from pydub import AudioSegment
 
-    vocals = AudioSegment.from_wav(str(config.CONVERTED_VOCALS))
+    vocals = AudioSegment.from_wav(str(converted_vocals_path))
     accomp = AudioSegment.from_wav(str(config.SEPARATED_ACCOMPANIMENT))
 
     # Volume adjustments
@@ -992,7 +1029,7 @@ def main():
     if args.all or args.separate:  steps.append(("Separate",  step_separate))
     if args.all or args.train:     steps.append(("Train",     lambda: step_train(quick=args.quick)))
     if args.all or args.convert:   steps.append(("Convert",   lambda: step_convert(exp_dir=args.ckpt)))
-    if args.all or args.mix:       steps.append(("Mix",       step_mix))
+    if args.all or args.mix:       steps.append(("Mix",       lambda: step_mix(exp_dir=args.ckpt)))
 
     for name, fn in steps:
         try:
