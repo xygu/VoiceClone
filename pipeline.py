@@ -23,12 +23,76 @@ Usage:
 
 import subprocess, sys, os, shutil, logging, argparse
 from pathlib import Path
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("myshot")
 
 sys.path.insert(0, str(Path(__file__).parent))
 import config
+
+# ── Experiment Directory Management ───────────────────────────────────────────
+EXP_DIR = Path(__file__).parent / "exp"
+
+def _get_timestamp():
+    """Generate a timestamp string for experiment directory."""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def _get_latest_exp_dir():
+    """Find the latest timestamp subfolder under ./exp/.
+    
+    Returns:
+        Path to the latest experiment directory, or None if none exists.
+    """
+    if not EXP_DIR.exists():
+        return None
+    
+    # Get all timestamp directories (format: YYYYMMDD_HHMMSS)
+    exp_subdirs = [d for d in EXP_DIR.iterdir() if d.is_dir() and len(d.name) == 15 and d.name[8] == '_']
+    
+    if not exp_subdirs:
+        return None
+    
+    # Sort by name (which is timestamp) and return the latest
+    return sorted(exp_subdirs, key=lambda d: d.name)[-1]
+
+def _find_pth_in_exp_dir(exp_dir):
+    """Find the .pth model file in an experiment directory.
+    
+    Args:
+        exp_dir: Path to experiment directory
+        
+    Returns:
+        Path to the .pth file, or None if not found.
+    """
+    if not exp_dir or not exp_dir.exists():
+        return None
+    
+    pth_files = list(exp_dir.glob("*.pth"))
+    if pth_files:
+        # Prefer my_voice.pth if it exists, otherwise return the first .pth
+        for f in pth_files:
+            if f.stem == config.RVC_MODEL_NAME:
+                return f
+        return pth_files[0]
+    return None
+
+def _find_index_in_exp_dir(exp_dir):
+    """Find the .index file in an experiment directory.
+    
+    Args:
+        exp_dir: Path to experiment directory
+        
+    Returns:
+        Path to the .index file, or None if not found.
+    """
+    if not exp_dir or not exp_dir.exists():
+        return None
+    
+    index_files = list(exp_dir.glob("*.index"))
+    if index_files:
+        return index_files[0]
+    return None
 
 
 # ── Checkpoint Conversion ─────────────────────────────────────────────────────
@@ -658,6 +722,13 @@ def _train_rvc_repo(quick=False):
         sr_str = f"{config.RVC_SAMPLE_RATE // 1000}k"
         version = "v2" if config.RVC_SAMPLE_RATE >= 48000 else "v1"
     
+    # Create timestamped experiment directory for saving models
+    EXP_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = _get_timestamp()
+    current_exp_dir = EXP_DIR / timestamp
+    current_exp_dir.mkdir(parents=True, exist_ok=True)
+    log.info(f"Saving trained model to experiment directory: {current_exp_dir}")
+    
     # Check if final model exists and has correct format
     import torch
     use_final_model = False
@@ -670,9 +741,13 @@ def _train_rvc_repo(quick=False):
         except Exception as e:
             log.warning(f"Could not load {final_model_in_rvc}: {e}")
     
+    # Define output paths in experiment directory
+    output_model_path = current_exp_dir / f"{config.RVC_MODEL_NAME}.pth"
+    output_index_path = current_exp_dir / f"{config.RVC_MODEL_NAME}.index"
+    
     if use_final_model:
-        shutil.copy2(final_model_in_rvc, config.RVC_TRAINED_MODEL)
-        log.info(f"Copied final model: {final_model_in_rvc} -> {config.RVC_TRAINED_MODEL}")
+        shutil.copy2(final_model_in_rvc, output_model_path)
+        log.info(f"Saved model: {output_model_path}")
     else:
         # Find and convert intermediate checkpoint
         g_files = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime)
@@ -690,25 +765,30 @@ def _train_rvc_repo(quick=False):
         log.info(f"Converting checkpoint to inference model (sr={sr_str}, version={version})...")
         _convert_checkpoint_to_inference_model(
             selected_ckpt, 
-            final_model_in_rvc, 
+            output_model_path,  # Save directly to exp directory
             sr_str, 
             version
         )
         
-        # Copy to project directory
-        shutil.copy2(final_model_in_rvc, config.RVC_TRAINED_MODEL)
-        log.info(f"Saved inference model: {config.RVC_TRAINED_MODEL}")
+        log.info(f"Saved inference model: {output_model_path}")
     
     # Copy index file if exists (improves voice similarity)
     index_files = sorted(exp.glob("*.index"), key=lambda p: p.stat().st_mtime)
     if index_files:
-        shutil.copy2(index_files[-1], config.RVC_TRAINED_INDEX)
-        log.info(f"Copied index file: {index_files[-1]} -> {config.RVC_TRAINED_INDEX}")
+        shutil.copy2(index_files[-1], output_index_path)
+        log.info(f"Saved index file: {output_index_path}")
+    
+    log.info(f"Model artifacts saved to: {current_exp_dir}")
 
 
 # ── STEP 4  Voice conversion (inference) ────────────────────────────────────
-def step_convert(ckpt_filename=None):
-    """Convert separated vocals to user's timbre (RVC) or copy through (passthrough)."""
+def step_convert(exp_dir=None):
+    """Convert separated vocals to user's timbre (RVC) or copy through (passthrough).
+    
+    Args:
+        exp_dir: Path to experiment directory containing model files.
+                 If None, automatically finds the latest ./exp/{timestamp}/ directory.
+    """
     log.info("=" * 60)
     log.info("STEP 4: Voice conversion")
     log.info("=" * 60)
@@ -726,27 +806,56 @@ def step_convert(ckpt_filename=None):
         log.info("STEP 4 COMPLETE")
         return
 
-    if not config.RVC_TRAINED_MODEL.exists():
-        raise FileNotFoundError("Run --train first.")
+    # Find model from experiment directory
+    if exp_dir is None:
+        exp_dir = _get_latest_exp_dir()
+        if exp_dir is None:
+            raise FileNotFoundError(
+                f"No experiment directory found under {EXP_DIR}. "
+                "Run --train first, or specify --ckpt <exp_dir>."
+            )
+        log.info(f"Using latest experiment directory: {exp_dir}")
+    else:
+        exp_dir = Path(exp_dir)
+        if not exp_dir.exists():
+            raise FileNotFoundError(f"Specified experiment directory not found: {exp_dir}")
+        log.info(f"Using specified experiment directory: {exp_dir}")
+    
+    # Find model file in experiment directory
+    model_path = _find_pth_in_exp_dir(exp_dir)
+    if model_path is None:
+        raise FileNotFoundError(f"No .pth model file found in {exp_dir}")
+    
+    index_path = _find_index_in_exp_dir(exp_dir)
+    if index_path:
+        log.info(f"Found index file: {index_path}")
+    else:
+        log.warning("No index file found in experiment directory (quality may be reduced)")
 
     try:
-        _convert_rvc_python()
+        _convert_rvc_python(model_path, index_path)
     except ImportError:
-        _convert_rvc_repo(ckpt_filename=ckpt_filename)
+        _convert_rvc_repo(model_path, index_path)
 
     log.info(f"Converted vocals → {config.CONVERTED_VOCALS}")
     log.info("STEP 4 COMPLETE")
 
 
-def _convert_rvc_python():
+def _convert_rvc_python(model_path, index_path=None):
+    """Convert vocals using rvc_python library.
+    
+    Args:
+        model_path: Path to the .pth model file
+        index_path: Path to the .index file (optional)
+    """
     from rvc_python import RVC
-    rvc = RVC(model_path=str(config.RVC_TRAINED_MODEL))
+    rvc = RVC(model_path=str(model_path))
     rvc.convert(
         input_path=str(config.SEPARATED_VOCALS),
         output_path=str(config.CONVERTED_VOCALS),
         f0_method=config.RVC_F0_METHOD,
         f0_up_key=config.RVC_TRANSPOSE,
-        index_path=str(config.RVC_TRAINED_INDEX) if config.RVC_TRAINED_INDEX.exists() else None,
+        index_path=str(index_path) if index_path and index_path.exists() else None,
         index_rate=config.RVC_INDEX_RATE,
         filter_radius=config.RVC_FILTER_RADIUS,
         rms_mix_rate=config.RVC_RMS_MIX_RATE,
@@ -754,7 +863,13 @@ def _convert_rvc_python():
     )
 
 
-def _convert_rvc_repo(ckpt_filename=None):
+def _convert_rvc_repo(model_path, index_path=None):
+    """Convert vocals using RVC repository's infer_cli.py.
+    
+    Args:
+        model_path: Path to the .pth model file
+        index_path: Path to the .index file (optional)
+    """
     rd = config.RVC_REPO_DIR
     infer_cli = rd / "tools" / "infer_cli.py"
     if not infer_cli.exists():
@@ -765,85 +880,14 @@ def _convert_rvc_repo(ckpt_filename=None):
     weights_dir = rd / "assets" / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
     
-    final_model_in_rvc = weights_dir / f"{config.RVC_MODEL_NAME}.pth"
-    model_filename = f"{config.RVC_MODEL_NAME}.pth"
+    # Copy model to RVC weights directory (required by infer_cli.py)
+    final_model_in_rvc = weights_dir / model_path.name
+    if not final_model_in_rvc.exists() or final_model_in_rvc.stat().st_mtime < model_path.stat().st_mtime:
+        shutil.copy2(model_path, final_model_in_rvc)
+        log.info(f"Copied model to RVC weights: {model_path} -> {final_model_in_rvc}")
     
-    import torch
+    model_filename = model_path.name
     
-    # Helper to check if model has correct format
-    def has_correct_format(path):
-        if not path.exists():
-            return False
-        try:
-            ckpt = torch.load(path, map_location="cpu", weights_only=False)
-            return "config" in ckpt
-        except:
-            return False
-    
-    # Try to find a valid model, converting if necessary
-    model_path = None
-    
-    if has_correct_format(final_model_in_rvc):
-        log.info(f"Using final model from RVC weights: {final_model_in_rvc}")
-        model_path = final_model_in_rvc
-    elif has_correct_format(config.RVC_TRAINED_MODEL):
-        log.info(f"Using model from project directory: {config.RVC_TRAINED_MODEL}")
-        shutil.copy2(config.RVC_TRAINED_MODEL, final_model_in_rvc)
-        model_path = final_model_in_rvc
-    else:
-        # Need to convert intermediate checkpoint
-        log.warning("No valid inference model found, looking for intermediate checkpoints...")
-        
-        exp = rd / "logs" / config.RVC_MODEL_NAME
-        g_files = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime) if exp.exists() else []
-        
-        if g_files:
-            # Get training config
-            sr_str, version = _get_training_config(exp)
-            if sr_str is None:
-                sr_str = f"{config.RVC_SAMPLE_RATE // 1000}k"
-                version = "v2"
-            
-            # Select checkpoint based on --ckpt filename
-            selected_ckpt = None
-            
-            if ckpt_filename is not None:
-                # Find by filename
-                selected_ckpt = exp / ckpt_filename
-                if not selected_ckpt.exists():
-                    log.warning(f"Checkpoint {ckpt_filename} not found in {exp}")
-                    selected_ckpt = None
-                else:
-                    log.info(f"Using specified checkpoint: {ckpt_filename}")
-            
-            if selected_ckpt is None:
-                # Use latest checkpoint by file modification time
-                g_files_sorted = sorted(g_files, key=lambda p: p.stat().st_mtime, reverse=True)
-                selected_ckpt = g_files_sorted[0]
-                log.info(f"Using latest checkpoint: {selected_ckpt.name}")
-            
-            log.info(f"Converting checkpoint to inference model (sr={sr_str}, version={version})...")
-            _convert_checkpoint_to_inference_model(selected_ckpt, final_model_in_rvc, sr_str, version)
-            model_path = final_model_in_rvc
-        else:
-            raise FileNotFoundError(
-                f"No valid model found. Run --train to generate a model."
-            )
-    
-    # Check for index file (optional but improves quality)
-    index_file = config.RVC_TRAINED_INDEX
-    if index_file.exists():
-        log.info(f"Index file found: {index_file}")
-    else:
-        # Check if index exists in RVC experiment directory
-        exp = rd / "logs" / config.RVC_MODEL_NAME
-        index_files = list(exp.glob("*.index")) if exp.exists() else []
-        if index_files:
-            shutil.copy2(index_files[-1], index_file)
-            log.info(f"Copied index file: {index_files[-1]} -> {index_file}")
-        else:
-            log.warning(f"Index file not found (quality may be reduced)")
-
     # Verify input vocals exist
     if not config.SEPARATED_VOCALS.exists():
         raise FileNotFoundError(
@@ -867,8 +911,8 @@ def _convert_rvc_repo(ckpt_filename=None):
         "--rms_mix_rate", str(config.RVC_RMS_MIX_RATE),
         "--protect", str(config.RVC_PROTECT),
     ]
-    if index_file.exists():
-        cmd += ["--index_path", str(index_file)]
+    if index_path and index_path.exists():
+        cmd += ["--index_path", str(index_path)]
     
     log.info(f"Running voice conversion...")
     log.info(f"  Model: {model_filename}")
@@ -938,8 +982,9 @@ def main():
     p.add_argument("--convert",   action="store_true", help="Step 4: Convert vocals (or passthrough copy)")
     p.add_argument("--mix",       action="store_true", help="Step 5: Mix final output")
     p.add_argument("--quick",     action="store_true", help="Quick mode: use minimal training epochs (2) for fast debugging")
-    p.add_argument("--ckpt", type=str, metavar="FILENAME", default=None,
-                   help="Checkpoint filename to use for inference (e.g., G_1600.pth). Default: use latest.")
+    p.add_argument("--ckpt", type=str, metavar="DIR", default=None,
+                   help="Experiment directory containing model files (e.g., ./exp/20260328_143000). "
+                        "Default: use latest ./exp/{timestamp}/ directory.")
     p.add_argument("--cookies-from-browser", type=str, metavar="BROWSER",
                    help="Browser to extract cookies from for YouTube authentication (e.g., chrome, safari, firefox)")
     p.add_argument("--cookies-file", type=str, metavar="FILE",
@@ -954,7 +999,7 @@ def main():
     if args.all or args.download:  steps.append(("Download",  lambda: step_download(args.cookies_from_browser, args.cookies_file)))
     if args.all or args.separate:  steps.append(("Separate",  step_separate))
     if args.all or args.train:     steps.append(("Train",     lambda: step_train(quick=args.quick)))
-    if args.all or args.convert:   steps.append(("Convert",   lambda: step_convert(ckpt_filename=args.ckpt)))
+    if args.all or args.convert:   steps.append(("Convert",   lambda: step_convert(exp_dir=args.ckpt)))
     if args.all or args.mix:       steps.append(("Mix",       step_mix))
 
     for name, fn in steps:
