@@ -612,13 +612,22 @@ def _convert_rvc_repo():
         # try alternative path
         infer_cli = rd / "infer" / "modules" / "vc" / "pipeline.py"
 
+    # Copy model to RVC weights directory (infer_cli.py expects model_name, not model_path)
+    weights_dir = rd / "assets" / "weights"
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    model_name = config.RVC_TRAINED_MODEL.stem  # e.g., "my_voice"
+    weights_model = weights_dir / config.RVC_TRAINED_MODEL.name
+    if not weights_model.exists():
+        shutil.copy2(config.RVC_TRAINED_MODEL, weights_model)
+        log.info(f"Copied model to RVC weights: {weights_model}")
+
     cmd = [
         sys.executable, str(infer_cli),
-        "--model_path", str(config.RVC_TRAINED_MODEL),
+        "--model_name", model_name,
         "--input_path", str(config.SEPARATED_VOCALS),
-        "--output_path", str(config.CONVERTED_VOCALS),
-        "--f0_method", config.RVC_F0_METHOD,
-        "--transpose", str(config.RVC_TRANSPOSE),
+        "--opt_path", str(config.CONVERTED_VOCALS),
+        "--f0method", config.RVC_F0_METHOD,
+        "--f0up_key", str(config.RVC_TRANSPOSE),
         "--index_rate", str(config.RVC_INDEX_RATE),
         "--filter_radius", str(config.RVC_FILTER_RADIUS),
         "--rms_mix_rate", str(config.RVC_RMS_MIX_RATE),
