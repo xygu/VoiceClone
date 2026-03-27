@@ -611,22 +611,46 @@ def _convert_rvc_repo():
     if not infer_cli.exists():
         # try alternative path
         infer_cli = rd / "infer" / "modules" / "vc" / "pipeline.py"
+        log.warning(f"Using alternative infer path: {infer_cli}")
+
+    # Verify source model exists
+    if not config.RVC_TRAINED_MODEL.exists():
+        raise FileNotFoundError(
+            f"Trained model not found: {config.RVC_TRAINED_MODEL}. "
+            "Run --train first to generate the model."
+        )
+    log.info(f"Source model: {config.RVC_TRAINED_MODEL}")
 
     # Copy model to RVC weights directory (infer_cli.py expects model_name, not model_path)
     weights_dir = rd / "assets" / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
-    model_name = config.RVC_TRAINED_MODEL.stem  # e.g., "my_voice"
-    weights_model = weights_dir / config.RVC_TRAINED_MODEL.name
-    if not weights_model.exists():
-        shutil.copy2(config.RVC_TRAINED_MODEL, weights_model)
-        log.info(f"Copied model to RVC weights: {weights_model}")
+    model_filename = config.RVC_TRAINED_MODEL.name  # e.g., "my_voice.pth"
+    weights_model = weights_dir / model_filename
+    # Always copy to ensure latest version
+    shutil.copy2(config.RVC_TRAINED_MODEL, weights_model)
+    log.info(f"Model copied to: {weights_model}")
+
+    # Check for index file (optional but improves quality)
+    index_file = config.RVC_TRAINED_INDEX
+    if index_file.exists():
+        log.info(f"Index file found: {index_file}")
+    else:
+        log.warning(f"Index file not found: {index_file} (quality may be reduced)")
+
+    # Verify input vocals exist
+    if not config.SEPARATED_VOCALS.exists():
+        raise FileNotFoundError(
+            f"Separated vocals not found: {config.SEPARATED_VOCALS}. "
+            "Run --separate first."
+        )
+    log.info(f"Input vocals: {config.SEPARATED_VOCALS}")
 
     # Set weight_root environment variable (required by infer_cli.py)
     rvc_env = {**os.environ, "weight_root": str(weights_dir), "PYTHONUNBUFFERED": "1"}
 
     cmd = [
         sys.executable, str(infer_cli),
-        "--model_name", model_name,
+        "--model_name", model_filename,
         "--input_path", str(config.SEPARATED_VOCALS),
         "--opt_path", str(config.CONVERTED_VOCALS),
         "--f0method", config.RVC_F0_METHOD,
@@ -636,8 +660,14 @@ def _convert_rvc_repo():
         "--rms_mix_rate", str(config.RVC_RMS_MIX_RATE),
         "--protect", str(config.RVC_PROTECT),
     ]
-    if config.RVC_TRAINED_INDEX.exists():
-        cmd += ["--index_path", str(config.RVC_TRAINED_INDEX)]
+    if index_file.exists():
+        cmd += ["--index_path", str(index_file)]
+    
+    log.info(f"Running voice conversion...")
+    log.info(f"  Model: {model_filename}")
+    log.info(f"  F0 method: {config.RVC_F0_METHOD}")
+    log.info(f"  Transpose: {config.RVC_TRANSPOSE}")
+    
     subprocess.run(
         cmd,
         cwd=str(rd),
