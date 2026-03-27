@@ -550,11 +550,32 @@ def _train_rvc_repo(quick=False):
         hint=f"RVC: training (epochs={training_epochs}, batch_size={config.RVC_BATCH_SIZE}) — longest step …",
     )
 
-    for pat, dst in [("G_*.pth", config.RVC_TRAINED_MODEL), ("*.index", config.RVC_TRAINED_INDEX)]:
-        files = sorted(exp.glob(pat), key=lambda p: p.stat().st_mtime)
-        if files:
-            shutil.copy2(files[-1], dst)
-            log.info(f"Saved: {dst}")
+    # The final inference model is saved by savee() to assets/weights/my_voice.pth
+    # This has the correct format: {"weight": ..., "config": [...], "f0": ..., "version": ...}
+    # The G_*.pth files are intermediate checkpoints with wrong format: {"model": ..., "iteration": ...}
+    final_model_in_rvc = rd / "assets" / "weights" / f"{config.RVC_MODEL_NAME}.pth"
+    
+    if final_model_in_rvc.exists():
+        # Use the final model saved by savee() - correct format for inference
+        shutil.copy2(final_model_in_rvc, config.RVC_TRAINED_MODEL)
+        log.info(f"Copied final model from RVC: {final_model_in_rvc} -> {config.RVC_TRAINED_MODEL}")
+    else:
+        # Fallback: try to find G_*.pth and warn about format
+        g_files = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime)
+        if g_files:
+            log.warning(f"Final model not found at {final_model_in_rvc}")
+            log.warning(f"Copying intermediate checkpoint {g_files[-1]} (may have compatibility issues)")
+            shutil.copy2(g_files[-1], config.RVC_TRAINED_MODEL)
+        else:
+            raise FileNotFoundError(
+                f"No model checkpoint found. Expected {final_model_in_rvc} or G_*.pth in {exp}"
+            )
+    
+    # Copy index file if exists (improves voice similarity)
+    index_files = sorted(exp.glob("*.index"), key=lambda p: p.stat().st_mtime)
+    if index_files:
+        shutil.copy2(index_files[-1], config.RVC_TRAINED_INDEX)
+        log.info(f"Copied index file: {index_files[-1]} -> {config.RVC_TRAINED_INDEX}")
 
 
 # ── STEP 4  Voice conversion (inference) ────────────────────────────────────
