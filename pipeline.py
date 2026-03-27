@@ -634,29 +634,72 @@ def _convert_rvc_repo():
         infer_cli = rd / "infer" / "modules" / "vc" / "pipeline.py"
         log.warning(f"Using alternative infer path: {infer_cli}")
 
-    # Verify source model exists
-    if not config.RVC_TRAINED_MODEL.exists():
-        raise FileNotFoundError(
-            f"Trained model not found: {config.RVC_TRAINED_MODEL}. "
-            "Run --train first to generate the model."
-        )
-    log.info(f"Source model: {config.RVC_TRAINED_MODEL}")
-
-    # Copy model to RVC weights directory (infer_cli.py expects model_name, not model_path)
+    # The correct final model is saved by savee() to assets/weights/my_voice.pth
+    # This has format: {"weight": ..., "config": [...], "f0": ..., "version": ...}
+    # RVC_TRAINED_MODEL (copied from G_*.pth) may have wrong format: {"model": ..., "iteration": ...}
     weights_dir = rd / "assets" / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
-    model_filename = config.RVC_TRAINED_MODEL.name  # e.g., "my_voice.pth"
-    weights_model = weights_dir / model_filename
-    # Always copy to ensure latest version
-    shutil.copy2(config.RVC_TRAINED_MODEL, weights_model)
-    log.info(f"Model copied to: {weights_model}")
+    
+    final_model_in_rvc = weights_dir / f"{config.RVC_MODEL_NAME}.pth"
+    model_filename = f"{config.RVC_MODEL_NAME}.pth"
+    
+    # Prefer the model in RVC's weights directory (correct format from savee())
+    # Fall back to RVC_TRAINED_MODEL if not found
+    if final_model_in_rvc.exists():
+        # Verify it has correct format
+        import torch
+        try:
+            ckpt = torch.load(final_model_in_rvc, map_location="cpu", weights_only=False)
+            if "config" in ckpt:
+                log.info(f"Using final model from RVC weights: {final_model_in_rvc}")
+            else:
+                log.warning(f"Model at {final_model_in_rvc} has wrong format, checking RVC_TRAINED_MODEL")
+                raise KeyError("config not found")
+        except Exception as e:
+            # Try RVC_TRAINED_MODEL as fallback
+            if config.RVC_TRAINED_MODEL.exists():
+                ckpt2 = torch.load(config.RVC_TRAINED_MODEL, map_location="cpu", weights_only=False)
+                if "config" in ckpt2:
+                    shutil.copy2(config.RVC_TRAINED_MODEL, final_model_in_rvc)
+                    log.info(f"Used fallback model: {config.RVC_TRAINED_MODEL}")
+                else:
+                    raise FileNotFoundError(
+                        f"Neither {final_model_in_rvc} nor {config.RVC_TRAINED_MODEL} has correct format. "
+                        "Re-run training to generate a valid model."
+                    )
+            else:
+                raise FileNotFoundError(f"No valid model found. {e}")
+    elif config.RVC_TRAINED_MODEL.exists():
+        # Check format and copy if valid
+        import torch
+        ckpt = torch.load(config.RVC_TRAINED_MODEL, map_location="cpu", weights_only=False)
+        if "config" in ckpt:
+            shutil.copy2(config.RVC_TRAINED_MODEL, final_model_in_rvc)
+            log.info(f"Copied model from: {config.RVC_TRAINED_MODEL}")
+        else:
+            raise FileNotFoundError(
+                f"Model at {config.RVC_TRAINED_MODEL} has wrong format (missing 'config' key). "
+                "Re-run training with --train to generate a valid model."
+            )
+    else:
+        raise FileNotFoundError(
+            f"No model found. Expected {final_model_in_rvc} or {config.RVC_TRAINED_MODEL}. "
+            "Run --train first."
+        )
 
     # Check for index file (optional but improves quality)
     index_file = config.RVC_TRAINED_INDEX
     if index_file.exists():
         log.info(f"Index file found: {index_file}")
     else:
-        log.warning(f"Index file not found: {index_file} (quality may be reduced)")
+        # Check if index exists in RVC experiment directory
+        exp = rd / "logs" / config.RVC_MODEL_NAME
+        index_files = list(exp.glob("*.index")) if exp.exists() else []
+        if index_files:
+            shutil.copy2(index_files[-1], index_file)
+            log.info(f"Copied index file: {index_files[-1]} -> {index_file}")
+        else:
+            log.warning(f"Index file not found (quality may be reduced)")
 
     # Verify input vocals exist
     if not config.SEPARATED_VOCALS.exists():
