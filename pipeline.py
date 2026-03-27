@@ -280,14 +280,18 @@ def step_separate():
 
 
 # ── STEP 3  Train RVC model ─────────────────────────────────────────────────
-def step_train(quick=False):
+def step_train(quick=False, continue_exp_dir=None):
     """Train a voice model (RVC) or skip when using passthrough backend.
     
     Args:
         quick: If True, use minimal epochs (2) for fast debugging of subsequent steps.
+        continue_exp_dir: If provided, resume training from this experiment directory.
+                          If None, start fresh training in a new timestamped directory.
     """
     log.info("=" * 60)
     log.info("STEP 3: Train voice model" + (" (QUICK MODE - 2 epochs)" if quick else ""))
+    if continue_exp_dir:
+        log.info(f"Resuming from: {continue_exp_dir}")
     log.info("=" * 60)
 
     if getattr(config, "VOICE_CONVERSION_BACKEND", "rvc") == "passthrough":
@@ -350,10 +354,10 @@ def step_train(quick=False):
                     "RVC_SLICE_AUDIO=False. "
                     "Please enable slicing once or place pre-sliced wav files there."
                 )
-        _train_rvc_python(sliced_dir, quick=quick)
+        _train_rvc_python(sliced_dir, quick=quick, continue_exp_dir=continue_exp_dir)
     except ImportError:
         # Use original audio file directly for RVC repo method (preserves quality)
-        _train_rvc_repo(quick=quick)
+        _train_rvc_repo(quick=quick, continue_exp_dir=continue_exp_dir)
 
     log.info("STEP 3 COMPLETE")
 
@@ -392,7 +396,17 @@ def _slice_audio(src, dst, seg_len=10.0, sr=40000):
     log.info(f"Sliced into {len(list(dst.glob('*.wav')))} segments")
 
 
-def _train_rvc_python(sliced_dir, quick=False):
+def _train_rvc_python(sliced_dir, quick=False, continue_exp_dir=None):
+    """Train using rvc_python library.
+    
+    Note: rvc_python does not support checkpoint resumption. 
+    If continue_exp_dir is provided, a warning will be logged and fresh training starts.
+    """
+    if continue_exp_dir:
+        log.warning(
+            "rvc_python backend does not support checkpoint resumption. "
+            f"Ignoring --continue {continue_exp_dir} and starting fresh training."
+        )
     from rvc_python import RVC
     rvc = RVC()
     epochs = 2 if quick else config.RVC_TRAINING_EPOCHS
@@ -488,10 +502,127 @@ def _detect_audio_sr(filepath):
             return None
 
 
-def _train_rvc_repo(quick=False):
+def _train_index(exp_dir, rvc_version):
+    """Train FAISS index for feature retrieval.
+    
+    This is a reimplementation of RVC's train_index function that works
+    directly on our exp directory instead of hardcoded logs/ path.
+    
+    Args:
+        exp_dir: Path to experiment directory containing feature files
+        rvc_version: "v1" or "v2"
+    """
+    import traceback
+    import numpy as np
+    import faiss
+    from sklearn.cluster import MiniBatchKMeans
+    
+    feature_dir = exp_dir / ("3_feature256" if rvc_version == "v1" else "3_feature768")
+    
+    if not feature_dir.exists():
+        log.warning(f"Feature directory not found: {feature_dir}, skipping index training")
+        return
+    
+    listdir_res = list(feature_dir.glob("*.npy"))
+    if not listdir_res:
+        log.warning(f"No feature files found in {feature_dir}, skipping index training")
+        return
+    
+    log.info(f"Training FAISS index from {len(listdir_res)} feature files...")
+    
+    npys = []
+    for name in sorted(listdir_res):
+        phone = np.load(str(name))
+        npys.append(phone)
+    
+    big_npy = np.concatenate(npys, 0)
+    big_npy_idx = np.arange(big_npy.shape[0])
+    np.random.shuffle(big_npy_idx)
+    big_npy = big_npy[big_npy_idx]
+    
+    if big_npy.shape[0] > 2e5:
+        log.info(f"Applying kmeans to reduce {big_npy.shape[0]} features to 10k centers...")
+        try:
+            big_npy = (
+                MiniBatchKMeans(
+                    n_clusters=10000,
+                    verbose=False,
+                    batch_size=256 * 4,
+                    compute_labels=False,
+                    init="random",
+                )
+                .fit(big_npy)
+                .cluster_centers_
+            )
+        except Exception:
+            log.warning(f"Kmeans failed: {traceback.format_exc()}")
+    
+    np.save(str(exp_dir / "total_fea.npy"), big_npy)
+    
+    n_ivf = min(int(16 * np.sqrt(big_npy.shape[0])), big_npy.shape[0] // 39)
+    log.info(f"Building IVF{n_ivf} index for {big_npy.shape} features...")
+    
+    index = faiss.index_factory(256 if rvc_version == "v1" else 768, f"IVF{n_ivf},Flat")
+    index_ivf = faiss.extract_index_ivf(index)
+    index_ivf.nprobe = 1
+    
+    log.info("Training index...")
+    index.train(big_npy)
+    
+    trained_index_path = exp_dir / f"trained_IVF{n_ivf}_Flat_nprobe_1_{config.RVC_MODEL_NAME}_{rvc_version}.index"
+    faiss.write_index(index, str(trained_index_path))
+    
+    log.info("Adding features to index...")
+    batch_size_add = 8192
+    for i in range(0, big_npy.shape[0], batch_size_add):
+        index.add(big_npy[i : i + batch_size_add])
+    
+    added_index_path = exp_dir / f"added_IVF{n_ivf}_Flat_nprobe_1_{config.RVC_MODEL_NAME}_{rvc_version}.index"
+    faiss.write_index(index, str(added_index_path))
+    
+    log.info(f"FAISS index saved: {added_index_path}")
+
+
+def _train_rvc_repo(quick=False, continue_exp_dir=None):
+    """Train RVC model using the RVC repository's training scripts.
+    
+    Args:
+        quick: If True, use minimal epochs (2) for fast debugging.
+        continue_exp_dir: If provided, resume training from this experiment directory
+                          (must contain G_*.pth and D_*.pth checkpoint files).
+                          If None, start fresh training in a new timestamped directory.
+    """
     rd = config.RVC_REPO_DIR
-    exp = rd / "logs" / config.RVC_MODEL_NAME
-    exp.mkdir(parents=True, exist_ok=True)
+    
+    # Determine experiment directory - RVC will train directly here
+    if continue_exp_dir is not None:
+        # Resume training from specified experiment directory
+        exp = Path(continue_exp_dir)
+        if not exp.is_absolute():
+            exp = Path(__file__).parent / exp
+        if not exp.exists():
+            raise FileNotFoundError(f"Continue experiment directory not found: {exp}")
+        
+        # Check for existing checkpoints
+        existing_g = list(exp.glob("G_*.pth"))
+        existing_d = list(exp.glob("D_*.pth"))
+        if not existing_g or not existing_d:
+            raise FileNotFoundError(
+                f"No checkpoints found in {exp}. "
+                "Need both G_*.pth and D_*.pth for resuming training."
+            )
+        
+        log.info(f"Resuming training from: {exp}")
+        need_reprocess = False  # Skip preprocessing when resuming
+    else:
+        # Fresh training: create new timestamped experiment directory
+        EXP_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = _get_timestamp()
+        exp = EXP_DIR / timestamp
+        exp.mkdir(parents=True, exist_ok=True)
+        log.info(f"Starting fresh training in new experiment: {exp}")
+        need_reprocess = True
+    
     gt = exp / "0_gt_wavs"
     
     # Determine version based on sample rate (40k only has v1 config)
@@ -507,21 +638,22 @@ def _train_rvc_repo(quick=False):
             config_template = rd / "configs" / "v1" / f"{sr // 1000}k.json"
 
     # Check if we need to reprocess audio (sample rate changed or no existing segments)
-    config_json = exp / "config.json"
-    need_reprocess = True
-    if config_json.exists() and gt.exists() and any(gt.glob("*.wav")):
-        import json
-        try:
-            with open(config_json, "r") as f:
-                existing_config = json.load(f)
-            existing_sr = existing_config.get("data", {}).get("sampling_rate")
-            if existing_sr == sr:
-                need_reprocess = False
-                log.info(f"Sample rate unchanged ({sr} Hz) and audio segments exist — skipping preprocessing")
-            else:
-                log.info(f"Sample rate changed from {existing_sr} Hz to {sr} Hz — reprocessing required")
-        except Exception:
-            pass
+    # Skip this check when resuming from continue_exp_dir (need_reprocess already set)
+    if continue_exp_dir is None:
+        config_json = exp / "config.json"
+        if config_json.exists() and gt.exists() and any(gt.glob("*.wav")):
+            import json
+            try:
+                with open(config_json, "r") as f:
+                    existing_config = json.load(f)
+                existing_sr = existing_config.get("data", {}).get("sampling_rate")
+                if existing_sr == sr:
+                    need_reprocess = False
+                    log.info(f"Sample rate unchanged ({sr} Hz) and audio segments exist — skipping preprocessing")
+                else:
+                    log.info(f"Sample rate changed from {existing_sr} Hz to {sr} Hz — reprocessing required")
+            except Exception:
+                pass
     
     if need_reprocess:
         # Clear existing segments to prevent accumulation across runs
@@ -616,9 +748,17 @@ def _train_rvc_repo(quick=False):
                 original_sr = config_data.get("data", {}).get("sampling_rate")
                 config_data["data"]["sampling_rate"] = sr
                 log.info(f"Adjusted config sampling_rate from {original_sr} to {sr}")
+            
+            # Set model_dir and experiment_dir to exp directory directly
+            # This makes RVC train.py work directly in our target directory
+            config_data["model_dir"] = str(exp)
+            config_data["experiment_dir"] = str(exp)
+            config_data["training_files"] = str(exp / "filelist.txt")
+            config_data["name"] = exp.name
+            
             with open(config_json, "w") as f:
                 json.dump(config_data, f, indent=4)
-            log.info(f"Created config.json from {config_template}")
+            log.info(f"Created config.json with model_dir={exp}")
         else:
             raise FileNotFoundError(f"Config template not found: {config_template}")
 
@@ -663,10 +803,16 @@ def _train_rvc_repo(quick=False):
     # Use minimal epochs for quick debugging
     training_epochs = 2 if quick else config.RVC_TRAINING_EPOCHS
     
+    # Calculate relative path from RVC logs dir to exp dir
+    # RVC's train.py does: experiment_dir = os.path.join("./logs", args.experiment_dir)
+    # So we pass a relative path like "../exp/20260328_xxx" to make it resolve to exp dir
+    exp_rel_to_logs = os.path.relpath(exp, rd / "logs")
+    log.info(f"Experiment path for RVC train.py: {exp_rel_to_logs}")
+    
     _run(
         "infer/modules/train/train.py",
         "-e",
-        config.RVC_MODEL_NAME,
+        exp_rel_to_logs,
         "-sr",
         sr_for_rvc,
         "-bs",
@@ -690,6 +836,11 @@ def _train_rvc_repo(quick=False):
         hint=f"RVC: training (epochs={training_epochs}, batch_size={config.RVC_BATCH_SIZE}) — longest step …",
     )
 
+    # Train index for feature retrieval (improves voice similarity)
+    # We implement this directly instead of calling RVC's train-index script
+    # because that script hardcodes logs/ path
+    _train_index(exp, rvc_version)
+
     # The final inference model is saved by savee() to assets/weights/my_voice.pth
     # This has the correct format: {"weight": ..., "config": [...], "f0": ..., "version": ...}
     # The G_*.pth files are intermediate checkpoints with wrong format: {"model": ..., "iteration": ...}
@@ -704,12 +855,8 @@ def _train_rvc_repo(quick=False):
         sr_str = f"{config.RVC_SAMPLE_RATE // 1000}k"
         version = "v2" if config.RVC_SAMPLE_RATE >= 48000 else "v1"
     
-    # Create timestamped experiment directory for saving models
-    EXP_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = _get_timestamp()
-    current_exp_dir = EXP_DIR / timestamp
-    current_exp_dir.mkdir(parents=True, exist_ok=True)
-    log.info(f"Saving trained model to experiment directory: {current_exp_dir}")
+    # exp is already the target directory - all files are saved there directly
+    log.info(f"Training artifacts are in: {exp}")
     
     # Check if final model exists and has correct format
     import torch
@@ -723,9 +870,9 @@ def _train_rvc_repo(quick=False):
         except Exception as e:
             log.warning(f"Could not load {final_model_in_rvc}: {e}")
     
-    # Define output paths in experiment directory
-    output_model_path = current_exp_dir / f"{config.RVC_MODEL_NAME}.pth"
-    output_index_path = current_exp_dir / f"{config.RVC_MODEL_NAME}.index"
+    # Define output paths in experiment directory (exp is already the target)
+    output_model_path = exp / f"{config.RVC_MODEL_NAME}.pth"
+    output_index_path = exp / f"{config.RVC_MODEL_NAME}.index"
     
     if use_final_model:
         shutil.copy2(final_model_in_rvc, output_model_path)
@@ -754,13 +901,18 @@ def _train_rvc_repo(quick=False):
         
         log.info(f"Saved inference model: {output_model_path}")
     
-    # Copy index file if exists (improves voice similarity)
+    # Rename index file if exists (improves voice similarity)
     index_files = sorted(exp.glob("*.index"), key=lambda p: p.stat().st_mtime)
     if index_files:
-        shutil.copy2(index_files[-1], output_index_path)
-        log.info(f"Saved index file: {output_index_path}")
+        # Rename the latest index file to standard name
+        latest_index = index_files[-1]
+        if latest_index.name != f"{config.RVC_MODEL_NAME}.index":
+            latest_index.rename(output_index_path)
+            log.info(f"Renamed index file: {latest_index} -> {output_index_path}")
+        else:
+            log.info(f"Index file: {output_index_path}")
     
-    log.info(f"Model artifacts saved to: {current_exp_dir}")
+    log.info(f"Model artifacts saved to: {exp}")
 
 
 # ── STEP 4  Voice conversion (inference) ────────────────────────────────────
@@ -1011,6 +1163,9 @@ def main():
     p.add_argument("--convert",   action="store_true", help="Step 4: Convert vocals (or passthrough copy)")
     p.add_argument("--mix",       action="store_true", help="Step 5: Mix final output")
     p.add_argument("--quick",     action="store_true", help="Quick mode: use minimal training epochs (2) for fast debugging")
+    p.add_argument("--continue-from", type=str, metavar="DIR", dest="continue_from", default=None,
+                   help="Resume training from an existing experiment directory containing G_*.pth and D_*.pth "
+                        "checkpoints. If not specified, fresh training starts in a new timestamped directory.")
     p.add_argument("--ckpt", type=str, metavar="DIR", default=None,
                    help="Experiment directory containing model files (e.g., ./exp/20260328_143000). "
                         "Default: use latest ./exp/{timestamp}/ directory.")
@@ -1020,14 +1175,14 @@ def main():
                    help="Path to cookies file for YouTube authentication (exported from browser extension)")
     args = p.parse_args()
 
-    if not any(v for k, v in vars(args).items() if k not in ("cookies_from_browser", "cookies_file", "quick", "ckpt")):
+    if not any(v for k, v in vars(args).items() if k not in ("cookies_from_browser", "cookies_file", "quick", "ckpt", "continue_from")):
         p.print_help()
         return
 
     steps = []
     if args.all or args.download:  steps.append(("Download",  lambda: step_download(args.cookies_from_browser, args.cookies_file)))
     if args.all or args.separate:  steps.append(("Separate",  step_separate))
-    if args.all or args.train:     steps.append(("Train",     lambda: step_train(quick=args.quick)))
+    if args.all or args.train:     steps.append(("Train",     lambda: step_train(quick=args.quick, continue_exp_dir=args.continue_from)))
     if args.all or args.convert:   steps.append(("Convert",   lambda: step_convert(exp_dir=args.ckpt)))
     if args.all or args.mix:       steps.append(("Mix",       lambda: step_mix(exp_dir=args.ckpt)))
 
