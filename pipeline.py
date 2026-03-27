@@ -590,20 +590,30 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
         quick: If True, use minimal epochs (2) for fast debugging.
         continue_exp_dir: If provided, resume training from this experiment directory
                           (must contain G_*.pth and D_*.pth checkpoint files).
-                          If None, start fresh training in a new timestamped directory.
+                          If None, start fresh training with new model output.
+    
+    Design:
+        - Preprocessing artifacts (audio slices, features, F0) are stored in fixed
+          location and reused: ./logs/{model_name}/
+        - Training artifacts (checkpoints, models, index) are stored in exp: ./exp/{timestamp}/
+        - After training, checkpoints are MOVED (not copied) from data_dir to exp
     """
     rd = config.RVC_REPO_DIR
     
-    # Determine experiment directory - RVC will train directly here
+    # Data directory: fixed location for reusable preprocessing artifacts only
+    data_dir = rd / "logs" / config.RVC_MODEL_NAME
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log.info(f"Data directory (preprocessing artifacts): {data_dir}")
+    
+    # Check if resuming from existing experiment
     if continue_exp_dir is not None:
-        # Resume training from specified experiment directory
         exp = Path(continue_exp_dir)
         if not exp.is_absolute():
             exp = Path(__file__).parent / exp
         if not exp.exists():
             raise FileNotFoundError(f"Continue experiment directory not found: {exp}")
         
-        # Check for existing checkpoints
+        # Copy checkpoints from exp to data_dir for RVC to find them
         existing_g = list(exp.glob("G_*.pth"))
         existing_d = list(exp.glob("D_*.pth"))
         if not existing_g or not existing_d:
@@ -612,18 +622,23 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
                 "Need both G_*.pth and D_*.pth for resuming training."
             )
         
-        log.info(f"Resuming training from: {exp}")
-        need_reprocess = False  # Skip preprocessing when resuming
+        for ckpt in existing_g + existing_d:
+            dest = data_dir / ckpt.name
+            shutil.copy2(ckpt, dest)
+            log.info(f"Copied checkpoint for resumption: {ckpt.name}")
+        
+        log.info(f"Resuming training, will save final model to: {exp}")
+        need_reprocess = False
     else:
-        # Fresh training: create new timestamped experiment directory
+        # Create new exp directory for training artifacts
         EXP_DIR.mkdir(parents=True, exist_ok=True)
         timestamp = _get_timestamp()
         exp = EXP_DIR / timestamp
         exp.mkdir(parents=True, exist_ok=True)
-        log.info(f"Starting fresh training in new experiment: {exp}")
-        need_reprocess = True
+        log.info(f"Fresh training, artifacts will be saved to: {exp}")
+        need_reprocess = True  # Will be overridden if data already exists
     
-    gt = exp / "0_gt_wavs"
+    gt = data_dir / "0_gt_wavs"
     
     # Determine version based on sample rate (40k only has v1 config)
     sr = config.RVC_SAMPLE_RATE
@@ -638,22 +653,21 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
             config_template = rd / "configs" / "v1" / f"{sr // 1000}k.json"
 
     # Check if we need to reprocess audio (sample rate changed or no existing segments)
-    # Skip this check when resuming from continue_exp_dir (need_reprocess already set)
-    if continue_exp_dir is None:
-        config_json = exp / "config.json"
-        if config_json.exists() and gt.exists() and any(gt.glob("*.wav")):
-            import json
-            try:
-                with open(config_json, "r") as f:
-                    existing_config = json.load(f)
-                existing_sr = existing_config.get("data", {}).get("sampling_rate")
-                if existing_sr == sr:
-                    need_reprocess = False
-                    log.info(f"Sample rate unchanged ({sr} Hz) and audio segments exist — skipping preprocessing")
-                else:
-                    log.info(f"Sample rate changed from {existing_sr} Hz to {sr} Hz — reprocessing required")
-            except Exception:
-                pass
+    # Data artifacts are in data_dir, so check there
+    config_json = data_dir / "config.json"
+    if config_json.exists() and gt.exists() and any(gt.glob("*.wav")):
+        import json
+        try:
+            with open(config_json, "r") as f:
+                existing_config = json.load(f)
+            existing_sr = existing_config.get("data", {}).get("sampling_rate")
+            if existing_sr == sr:
+                need_reprocess = False
+                log.info(f"Data artifacts exist at {data_dir} (sample_rate={sr} Hz) — skipping preprocessing")
+            else:
+                log.info(f"Sample rate changed from {existing_sr} Hz to {sr} Hz — reprocessing required")
+        except Exception:
+            pass
     
     if need_reprocess:
         # Clear existing segments to prevent accumulation across runs
@@ -738,7 +752,7 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
             log.warning(f"Script not found: {s}")
 
     if need_reprocess:
-        # Create/overwrite config.json when reprocessing (ensures sample rate consistency)
+        # Create/overwrite config.json in data_dir
         if config_template.exists():
             import json
             with open(config_template, "r") as f:
@@ -749,38 +763,35 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
                 config_data["data"]["sampling_rate"] = sr
                 log.info(f"Adjusted config sampling_rate from {original_sr} to {sr}")
             
-            # Set model_dir and experiment_dir to exp directory directly
-            # This makes RVC train.py work directly in our target directory
-            config_data["model_dir"] = str(exp)
-            config_data["experiment_dir"] = str(exp)
-            config_data["training_files"] = str(exp / "filelist.txt")
-            config_data["name"] = exp.name
+            # training_files points to data_dir (where filelist.txt is generated)
+            config_data["training_files"] = str(data_dir / "filelist.txt")
             
             with open(config_json, "w") as f:
                 json.dump(config_data, f, indent=4)
-            log.info(f"Created config.json with model_dir={exp}")
+            log.info(f"Created config.json in {data_dir}")
         else:
             raise FileNotFoundError(f"Config template not found: {config_template}")
 
+        # Run preprocessing scripts - all save to data_dir
         _run(
             "infer/modules/train/preprocess.py",
             str(gt),
             str(config.RVC_SAMPLE_RATE),
             "4",
-            str(exp),
+            str(data_dir),
             "False",
             "3.7",
             hint=f"RVC: preprocessing audio slices (sample_rate={config.RVC_SAMPLE_RATE}) …",
         )
         _run(
             "infer/modules/train/extract/extract_f0_print.py",
-            str(exp),
+            str(data_dir),
             "4",
             config.RVC_F0_METHOD,
             hint=(
                 "RVC: extracting F0 (rmvpe loads a large model per worker on CPU — "
                 "often several minutes with little terminal output). "
-                f"Tail log: {exp / 'extract_f0_feature.log'}"
+                f"Tail log: {data_dir / 'extract_f0_feature.log'}"
             ),
         )
         _run(
@@ -788,14 +799,14 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
             "cuda",  # GPU device - uses CUDA_VISIBLE_DEVICES set above
             "1",
             "0",
-            str(exp),
+            str(data_dir),
             rvc_version,
             "true",
             hint="RVC: extracting HuBERT features (GPU if available; may be slow on CPU) …",
         )
 
-    # Generate filelist.txt required by train.py
-    _generate_filelist(exp, rvc_version, config.RVC_SAMPLE_RATE)
+    # Generate filelist.txt in data_dir
+    _generate_filelist(data_dir, rvc_version, config.RVC_SAMPLE_RATE)
 
     # Convert sample rate to RVC format (e.g., 48000 -> "48k")
     sr_for_rvc = f"{config.RVC_SAMPLE_RATE // 1000}k"
@@ -803,16 +814,12 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
     # Use minimal epochs for quick debugging
     training_epochs = 2 if quick else config.RVC_TRAINING_EPOCHS
     
-    # Calculate relative path from RVC logs dir to exp dir
-    # RVC's train.py does: experiment_dir = os.path.join("./logs", args.experiment_dir)
-    # So we pass a relative path like "../exp/20260328_xxx" to make it resolve to exp dir
-    exp_rel_to_logs = os.path.relpath(exp, rd / "logs")
-    log.info(f"Experiment path for RVC train.py: {exp_rel_to_logs}")
-    
+    # RVC's train.py expects -e to be the experiment name (used as ./logs/{name}/)
+    # It reads config from ./logs/{name}/config.json and saves checkpoints there
     _run(
         "infer/modules/train/train.py",
         "-e",
-        exp_rel_to_logs,
+        config.RVC_MODEL_NAME,
         "-sr",
         sr_for_rvc,
         "-bs",
@@ -837,26 +844,20 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
     )
 
     # Train index for feature retrieval (improves voice similarity)
-    # We implement this directly instead of calling RVC's train-index script
-    # because that script hardcodes logs/ path
-    _train_index(exp, rvc_version)
+    # Features are in data_dir, index is saved there too
+    _train_index(data_dir, rvc_version)
 
-    # The final inference model is saved by savee() to assets/weights/my_voice.pth
-    # This has the correct format: {"weight": ..., "config": [...], "f0": ..., "version": ...}
-    # The G_*.pth files are intermediate checkpoints with wrong format: {"model": ..., "iteration": ...}
+    # The final inference model is saved by savee() to assets/weights/{model_name}.pth
     final_model_in_rvc = rd / "assets" / "weights" / f"{config.RVC_MODEL_NAME}.pth"
     weights_dir = rd / "assets" / "weights"
     weights_dir.mkdir(parents=True, exist_ok=True)
     
-    # Get training config (sample rate, version)
-    sr_str, version = _get_training_config(exp)
+    # Get training config (sample rate, version) from data_dir
+    sr_str, version = _get_training_config(data_dir)
     if sr_str is None:
         # Fallback to config.py settings
         sr_str = f"{config.RVC_SAMPLE_RATE // 1000}k"
         version = "v2" if config.RVC_SAMPLE_RATE >= 48000 else "v1"
-    
-    # exp is already the target directory - all files are saved there directly
-    log.info(f"Training artifacts are in: {exp}")
     
     # Check if final model exists and has correct format
     import torch
@@ -870,7 +871,7 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
         except Exception as e:
             log.warning(f"Could not load {final_model_in_rvc}: {e}")
     
-    # Define output paths in experiment directory (exp is already the target)
+    # Output paths in exp directory
     output_model_path = exp / f"{config.RVC_MODEL_NAME}.pth"
     output_index_path = exp / f"{config.RVC_MODEL_NAME}.index"
     
@@ -878,11 +879,11 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
         shutil.copy2(final_model_in_rvc, output_model_path)
         log.info(f"Saved model: {output_model_path}")
     else:
-        # Find and convert intermediate checkpoint
-        g_files = sorted(exp.glob("G_*.pth"), key=lambda p: p.stat().st_mtime)
+        # Find intermediate checkpoint in data_dir
+        g_files = sorted(data_dir.glob("G_*.pth"), key=lambda p: p.stat().st_mtime)
         if not g_files:
             raise FileNotFoundError(
-                f"No model checkpoint found. Expected {final_model_in_rvc} or G_*.pth in {exp}"
+                f"No model checkpoint found. Expected {final_model_in_rvc} or G_*.pth in {data_dir}"
             )
         
         # Use latest checkpoint by file modification time
@@ -894,25 +895,45 @@ def _train_rvc_repo(quick=False, continue_exp_dir=None):
         log.info(f"Converting checkpoint to inference model (sr={sr_str}, version={version})...")
         _convert_checkpoint_to_inference_model(
             selected_ckpt, 
-            output_model_path,  # Save directly to exp directory
+            output_model_path,  # Save to exp directory
             sr_str, 
             version
         )
         
         log.info(f"Saved inference model: {output_model_path}")
     
-    # Rename index file if exists (improves voice similarity)
-    index_files = sorted(exp.glob("*.index"), key=lambda p: p.stat().st_mtime)
-    if index_files:
-        # Rename the latest index file to standard name
-        latest_index = index_files[-1]
-        if latest_index.name != f"{config.RVC_MODEL_NAME}.index":
-            latest_index.rename(output_index_path)
-            log.info(f"Renamed index file: {latest_index} -> {output_index_path}")
-        else:
-            log.info(f"Index file: {output_index_path}")
+    # Move training artifacts from data_dir to exp
+    # After this, data_dir should only contain preprocessing artifacts
     
-    log.info(f"Model artifacts saved to: {exp}")
+    # Move index file and rename to standard name
+    index_files = list(data_dir.glob("*.index"))
+    if index_files:
+        # Use the latest index file
+        latest_index = sorted(index_files, key=lambda p: p.stat().st_mtime)[-1]
+        shutil.move(str(latest_index), str(output_index_path))
+        log.info(f"Moved index file: {output_index_path}")
+        # Clean up any other index files
+        for idx_file in data_dir.glob("*.index"):
+            idx_file.unlink()
+            log.info(f"Cleaned up old index: {idx_file}")
+    
+    # Move all checkpoints (training generates G_*.pth, D_*.pth)
+    for ckpt in data_dir.glob("G_*.pth"):
+        shutil.move(str(ckpt), str(exp / ckpt.name))
+        log.info(f"Moved checkpoint: {exp / ckpt.name}")
+    
+    for ckpt in data_dir.glob("D_*.pth"):
+        shutil.move(str(ckpt), str(exp / ckpt.name))
+        log.info(f"Moved checkpoint: {exp / ckpt.name}")
+    
+    # Copy config.json to exp for reference
+    config_json_src = data_dir / "config.json"
+    if config_json_src.exists():
+        shutil.copy2(config_json_src, exp / "config.json")
+        log.info(f"Saved config.json: {exp / 'config.json'}")
+    
+    log.info(f"Training artifacts saved to: {exp}")
+    log.info(f"Data directory {data_dir} now contains only preprocessing artifacts")
 
 
 # ── STEP 4  Voice conversion (inference) ────────────────────────────────────
