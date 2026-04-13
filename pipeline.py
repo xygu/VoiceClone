@@ -1174,6 +1174,230 @@ def step_mix(exp_dir=None):
     log.info("STEP 5 COMPLETE — Enjoy your song!")
 
 
+# ── STEP 5b  Chorus post-processing ─────────────────────────────────────────
+def step_chorus_postprocess(exp_dir=None):
+    """Apply chorus handling strategy to converted vocals before final mix.
+    
+    This step addresses the known artifact where multi-voice chorus segments
+    produce unnatural results when processed through a single-speaker RVC model.
+    
+    Three strategies available (configured via config.CHORUS_HANDLING_STRATEGY):
+      - "background": Replace chorus with original vocals at reduced volume
+      - "enhanced_f0": Apply enhanced F0 estimation for chorus regions
+      - "hybrid": Auto-select strategy based on chorus voice density
+    
+    Args:
+        exp_dir: Experiment directory containing vocals_converted.wav
+    """
+    strategy = getattr(config, "CHORUS_HANDLING_STRATEGY", "none")
+    if strategy == "none":
+        log.info("Chorus handling disabled (CHORUS_HANDLING_STRATEGY=none)")
+        return
+    
+    log.info("=" * 60)
+    log.info(f"STEP 5b: Chorus post-processing (strategy={strategy})")
+    log.info("=" * 60)
+    
+    from chorus_handler import (
+        ChorusDetector, get_default_chorus_segments,
+        apply_chorus_as_background, enhance_f0_for_chorus,
+        apply_hybrid_strategy,
+    )
+    
+    # Determine experiment directory
+    if exp_dir is None:
+        exp_dir = _get_latest_exp_dir()
+        if exp_dir is None:
+            raise FileNotFoundError(f"No experiment directory found under {EXP_DIR}.")
+    else:
+        exp_dir = Path(exp_dir)
+    
+    converted_vocals_path = exp_dir / "vocals_converted.wav"
+    if not converted_vocals_path.exists():
+        raise FileNotFoundError(f"Converted vocals not found: {converted_vocals_path}")
+    
+    # Detect or load chorus segments
+    chorus_segments_file = getattr(config, "CHORUS_SEGMENTS_FILE", None)
+    detection_method = getattr(config, "CHORUS_DETECTION_METHOD", "auto")
+    
+    if chorus_segments_file and Path(chorus_segments_file).exists():
+        import json
+        with open(chorus_segments_file) as f:
+            chorus_segments = json.load(f)
+        log.info(f"Loaded {len(chorus_segments)} chorus segments from {chorus_segments_file}")
+    elif detection_method == "manual":
+        log.info("Using default Hamilton 'My Shot' chorus annotations")
+        chorus_segments = get_default_chorus_segments()
+    else:
+        log.info("Auto-detecting chorus segments...")
+        detector = ChorusDetector()
+        chorus_segments = detector.detect(config.SEPARATED_VOCALS)
+    
+    if not chorus_segments:
+        log.info("No chorus segments detected, skipping chorus handling")
+        return
+    
+    output_path = exp_dir / "vocals_chorus_processed.wav"
+    
+    if strategy == "background":
+        apply_chorus_as_background(
+            converted_vocals_path=str(converted_vocals_path),
+            original_vocals_path=str(config.SEPARATED_VOCALS),
+            chorus_segments=chorus_segments,
+            output_path=str(output_path),
+            crossfade_sec=getattr(config, "CHORUS_CROSSFADE_SEC", 0.5),
+            chorus_volume_db=getattr(config, "CHORUS_VOLUME_DB", -6.0),
+        )
+    elif strategy == "enhanced_f0":
+        # Enhanced F0 produces an improved F0 file; re-run conversion with it
+        f0_path = exp_dir / "f0_enhanced.npy"
+        enhance_f0_for_chorus(
+            vocals_path=str(config.SEPARATED_VOCALS),
+            chorus_segments=chorus_segments,
+            output_f0_path=str(f0_path),
+            median_kernel=getattr(config, "CHORUS_F0_MEDIAN_KERNEL", 11),
+        )
+        # For now, fall back to background strategy (full re-inference with custom F0
+        # requires deeper RVC integration)
+        apply_chorus_as_background(
+            converted_vocals_path=str(converted_vocals_path),
+            original_vocals_path=str(config.SEPARATED_VOCALS),
+            chorus_segments=chorus_segments,
+            output_path=str(output_path),
+            crossfade_sec=getattr(config, "CHORUS_CROSSFADE_SEC", 0.5),
+            chorus_volume_db=getattr(config, "CHORUS_VOLUME_DB", -4.0),  # Less reduction
+        )
+    elif strategy == "hybrid":
+        apply_hybrid_strategy(
+            converted_vocals_path=str(converted_vocals_path),
+            original_vocals_path=str(config.SEPARATED_VOCALS),
+            chorus_segments=chorus_segments,
+            output_path=str(output_path),
+        )
+    
+    log.info(f"Chorus-processed vocals → {output_path}")
+    log.info("STEP 5b COMPLETE")
+
+
+# ── STEP 6  Evaluate ────────────────────────────────────────────────────────
+def step_evaluate(exp_dir=None):
+    """Run quantitative evaluation on the conversion output.
+    
+    Computes objective metrics including MCD, F0-RMSE, speaker similarity,
+    and optional chorus-specific analysis.
+    
+    Args:
+        exp_dir: Experiment directory containing converted vocals
+    """
+    log.info("=" * 60)
+    log.info("STEP 6: Quantitative Evaluation")
+    log.info("=" * 60)
+    
+    from evaluate import evaluate_conversion, evaluate_chorus_handling
+    import json
+    
+    if exp_dir is None:
+        exp_dir = _get_latest_exp_dir()
+        if exp_dir is None:
+            raise FileNotFoundError(f"No experiment directory found under {EXP_DIR}.")
+    else:
+        exp_dir = Path(exp_dir)
+    
+    # Determine which vocals to evaluate
+    chorus_processed = exp_dir / "vocals_chorus_processed.wav"
+    converted = exp_dir / "vocals_converted.wav"
+    eval_target = chorus_processed if chorus_processed.exists() else converted
+    
+    if not eval_target.exists():
+        raise FileNotFoundError(f"No converted vocals found in {exp_dir}")
+    
+    log.info(f"Evaluating: {eval_target}")
+    
+    # Reference: original separated vocals
+    reference = config.SEPARATED_VOCALS if config.SEPARATED_VOCALS.exists() else None
+    target_speaker = config.USER_VOICE_FILE if config.USER_VOICE_FILE.exists() else None
+    
+    results = evaluate_conversion(
+        converted_wav=str(eval_target),
+        reference_wav=str(reference) if reference else None,
+        target_speaker_wav=str(target_speaker) if target_speaker else None,
+    )
+    
+    # Save results
+    eval_dir = getattr(config, "EVAL_OUTPUT_DIR", config.OUTPUT_DIR / "evaluation")
+    Path(eval_dir).mkdir(parents=True, exist_ok=True)
+    
+    def clean_for_json(obj):
+        import numpy as np
+        if isinstance(obj, dict):
+            return {k: clean_for_json(v) for k, v in obj.items() if not isinstance(v, np.ndarray)}
+        elif isinstance(obj, (np.floating, np.integer)):
+            return float(obj)
+        return obj
+    
+    results_path = Path(eval_dir) / f"eval_{exp_dir.name}.json"
+    with open(results_path, "w") as f:
+        json.dump(clean_for_json(results), f, indent=2, ensure_ascii=False, default=str)
+    
+    log.info(f"Evaluation results saved: {results_path}")
+    log.info("STEP 6 COMPLETE")
+    return results
+
+
+# ── STEP 7  Pipeline Comparison (ablation: with vs without separation) ──────
+def step_convert_no_separation(exp_dir=None):
+    """Convert vocals WITHOUT source separation (ablation experiment).
+    
+    Instead of separating vocals first, this feeds the mixed audio directly
+    to RVC. The result is expected to be worse due to accompaniment interference.
+    
+    This step is used for the ablation study comparing:
+      Pipeline A: Demucs separation → RVC on clean vocals → Mix
+      Pipeline B: RVC directly on mixed audio → (output contains artifacts)
+    
+    Args:
+        exp_dir: Experiment directory containing model files
+    """
+    log.info("=" * 60)
+    log.info("ABLATION: Voice conversion WITHOUT separation")
+    log.info("=" * 60)
+    
+    if not config.DOWNLOADED_WAV.exists():
+        raise FileNotFoundError("Run --download first.")
+    
+    if exp_dir is None:
+        exp_dir = _get_latest_exp_dir()
+        if exp_dir is None:
+            raise FileNotFoundError(f"No experiment directory found under {EXP_DIR}.")
+    else:
+        exp_dir = Path(exp_dir)
+    
+    model_path = _find_pth_in_exp_dir(exp_dir)
+    if model_path is None:
+        raise FileNotFoundError(f"No .pth model file found in {exp_dir}")
+    
+    index_path = _find_index_in_exp_dir(exp_dir)
+    output_path = exp_dir / "vocals_converted_no_separation.wav"
+    
+    log.info(f"Input: {config.DOWNLOADED_WAV} (mixed audio, no separation)")
+    log.info(f"Model: {model_path}")
+    log.info(f"Output: {output_path}")
+    
+    # Temporarily override SEPARATED_VOCALS to point to mixed audio
+    original_sep_vocals = config.SEPARATED_VOCALS
+    try:
+        config.SEPARATED_VOCALS = config.DOWNLOADED_WAV
+        try:
+            _convert_rvc_python(model_path, index_path, output_path)
+        except ImportError:
+            _convert_rvc_repo(model_path, index_path, output_path)
+    finally:
+        config.SEPARATED_VOCALS = original_sep_vocals
+    
+    log.info(f"No-separation conversion → {output_path}")
+    log.info("ABLATION COMPLETE")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 def main():
     p = argparse.ArgumentParser(description="Hamilton 'My Shot' Voice Conversion Pipeline")
@@ -1183,6 +1407,9 @@ def main():
     p.add_argument("--train",     action="store_true", help="Step 3: Train voice model (RVC; skipped if passthrough)")
     p.add_argument("--convert",   action="store_true", help="Step 4: Convert vocals (or passthrough copy)")
     p.add_argument("--mix",       action="store_true", help="Step 5: Mix final output")
+    p.add_argument("--chorus",    action="store_true", help="Step 5b: Apply chorus handling post-processing")
+    p.add_argument("--evaluate",  action="store_true", help="Step 6: Run quantitative evaluation")
+    p.add_argument("--ablation-no-sep", action="store_true", help="Ablation: convert without separation")
     p.add_argument("--quick",     action="store_true", help="Quick mode: use minimal training epochs (2) for fast debugging")
     p.add_argument("--continue-from", type=str, metavar="DIR", dest="continue_from", default=None,
                    help="Resume training from an existing experiment directory containing G_*.pth and D_*.pth "
@@ -1205,7 +1432,10 @@ def main():
     if args.all or args.separate:  steps.append(("Separate",  step_separate))
     if args.all or args.train:     steps.append(("Train",     lambda: step_train(quick=args.quick, continue_exp_dir=args.continue_from)))
     if args.all or args.convert:   steps.append(("Convert",   lambda: step_convert(exp_dir=args.ckpt)))
+    if args.chorus:                steps.append(("Chorus",    lambda: step_chorus_postprocess(exp_dir=args.ckpt)))
     if args.all or args.mix:       steps.append(("Mix",       lambda: step_mix(exp_dir=args.ckpt)))
+    if args.evaluate:              steps.append(("Evaluate",  lambda: step_evaluate(exp_dir=args.ckpt)))
+    if args.ablation_no_sep:       steps.append(("Ablation",  lambda: step_convert_no_separation(exp_dir=args.ckpt)))
 
     for name, fn in steps:
         try:

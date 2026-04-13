@@ -108,12 +108,44 @@ RVC_TRAINED_INDEX = RVC_DIR / "my_voice.index"
 # =============================================================================
 RVC_TRANSPOSE = 0  # Pitch shift in semitones (0 = no shift, +12 = one octave up)
 RVC_INDEX_RATE = 0.75  # How much to use the retrieval index (0.0-1.0)
-RVC_FILTER_RADIUS = 3  # Median filtering radius for f0 (reduces breathiness)
+RVC_FILTER_RADIUS = 7  # Median filtering radius for f0 (reduces breathiness, larger = smoother pitch)
 RVC_RESAMPLE_SR = 0  # 0 = no resampling
 RVC_RMS_MIX_RATE = 0.25  # Volume envelope mix (0 = output envelope, 1 = input envelope)
 RVC_PROTECT = 0.33  # Protect voiceless consonants (0-0.5, higher = more protection)
 
 CONVERTED_VOCALS = INTERMEDIATE_DIR / "vocals_converted.wav"
+
+# =============================================================================
+# Pipeline Mode: with-separation vs without-separation (ablation experiment)
+# =============================================================================
+# "with_separation" — Standard pipeline: Demucs → RVC → Mix (recommended)
+# "without_separation" — Ablation: skip Demucs, feed mixed audio directly to RVC
+#   This mode is for A/B comparison experiments only. Expected to produce lower
+#   quality due to accompaniment interference in F0 estimation and conversion.
+PIPELINE_MODE = "with_separation"  # "with_separation" | "without_separation"
+
+# =============================================================================
+# Chorus Handling Configuration
+# =============================================================================
+# "none" — No special chorus handling (default, may produce artifacts)
+# "background" — Strategy A: replace chorus with original vocals at lower volume
+# "enhanced_f0" — Strategy B: enhanced F0 estimation for chorus regions
+# "hybrid" — Adaptive: auto-select Strategy A or B based on chorus density
+CHORUS_HANDLING_STRATEGY = "hybrid"  # "none" | "background" | "enhanced_f0" | "hybrid"
+
+# Chorus detection parameters
+CHORUS_DETECTION_METHOD = "auto"   # "auto" (spectral analysis) or "manual" (use CHORUS_SEGMENTS_FILE)
+CHORUS_SEGMENTS_FILE = None        # Path to JSON with manual chorus annotations, e.g. [[47.0, 63.0], ...]
+CHORUS_CROSSFADE_SEC = 0.5         # Crossfade duration at chorus boundaries
+CHORUS_VOLUME_DB = -6.0            # Volume reduction for chorus-as-background (Strategy A)
+CHORUS_F0_MEDIAN_KERNEL = 11       # Median filter size for enhanced F0 (Strategy B)
+
+# =============================================================================
+# Evaluation Configuration
+# =============================================================================
+EVAL_SPEAKER_MODEL = "resemblyzer"  # "resemblyzer", "ecapa_tdnn", or "mfcc" (lightweight fallback)
+EVAL_F0_METHOD = "pyin"             # F0 method for evaluation (independent of RVC inference)
+EVAL_OUTPUT_DIR = OUTPUT_DIR / "evaluation"
 
 # =============================================================================
 # Step 6: Mixing Configuration
